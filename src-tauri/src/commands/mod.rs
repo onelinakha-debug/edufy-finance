@@ -1,0 +1,10 @@
+pub mod dashboard;
+pub mod fee;
+pub mod grade;
+pub mod invoice;
+pub mod mpesa;
+pub mod payment;
+pub mod report;
+pub mod school;
+pub mod settings;
+pub mod student;

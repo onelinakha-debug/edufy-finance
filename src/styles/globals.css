@@ -1,0 +1,192 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Claude-inspired warm palette */
+    --background: 50 50% 97%;           /* #FAFAF8 warm off-white */
+    --foreground: 0 0% 10%;             /* #1A1A1A dark charcoal */
+
+    --card: 0 0% 100%;                  /* #FFFFFF white surfaces */
+    --card-foreground: 0 0% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 10%;
+
+    --primary: 12 64% 52%;              /* #C96442 terracotta accent */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 60 4% 96%;             /* #F5F5F3 light gray */
+    --secondary-foreground: 0 0% 25%;
+
+    --muted: 60 4% 96%;
+    --muted-foreground: 0 0% 45%;
+
+    --accent: 60 4% 96%;
+    --accent-foreground: 0 0% 10%;
+
+    --destructive: 0 72% 51%;           /* Red for errors */
+    --destructive-foreground: 0 0% 98%;
+
+    --success: 145 55% 35%;             /* Green for paid/success */
+    --success-foreground: 0 0% 100%;
+
+    --warning: 42 75% 44%;              /* Amber for pending */
+    --warning-foreground: 0 0% 10%;
+
+    --border: 60 5% 90%;                /* #E5E4E1 subtle border */
+    --input: 60 5% 90%;
+    --ring: 12 64% 52%;
+
+    --sidebar: 60 4% 96%;               /* #F5F5F3 sidebar bg */
+    --sidebar-foreground: 0 0% 25%;
+    --sidebar-accent: 60 4% 93%;
+    --sidebar-border: 60 5% 90%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 60 5% 10%;            /* #1A1A18 dark bg */
+    --foreground: 60 5% 93%;
+
+    --card: 60 5% 13%;
+    --card-foreground: 60 5% 93%;
+
+    --popover: 60 5% 13%;
+    --popover-foreground: 60 5% 93%;
+
+    --primary: 12 64% 58%;              /* lighter terracotta for dark */
+    --primary-foreground: 0 0% 10%;
+
+    --secondary: 60 5% 16%;
+    --secondary-foreground: 60 5% 85%;
+
+    --muted: 60 5% 16%;
+    --muted-foreground: 60 5% 55%;
+
+    --accent: 60 5% 16%;
+    --accent-foreground: 60 5% 93%;
+
+    --destructive: 0 62% 55%;
+    --destructive-foreground: 0 0% 98%;
+
+    --success: 145 50% 45%;
+    --success-foreground: 0 0% 10%;
+
+    --warning: 42 70% 55%;
+    --warning-foreground: 0 0% 10%;
+
+    --border: 60 5% 18%;
+    --input: 60 5% 18%;
+    --ring: 12 64% 58%;
+
+    --sidebar: 60 5% 12%;
+    --sidebar-foreground: 60 5% 85%;
+    --sidebar-accent: 60 5% 16%;
+    --sidebar-border: 60 5% 18%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  /* Smooth scrolling */
+  html {
+    scroll-behavior: smooth;
+  }
+
+  /* Focus styles */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  /* Selection */
+  ::selection {
+    @apply bg-primary/20 text-foreground;
+  }
+}
+
+@layer components {
+  /* Page container with consistent padding */
+  .page-container {
+    @apply px-8 py-6 max-w-[1200px] mx-auto;
+  }
+
+  /* Card with border, no shadow (Claude style) */
+  .card-claude {
+    @apply bg-card border border-border rounded-lg;
+  }
+
+  /* Stat card */
+  .stat-card {
+    @apply card-claude p-3 flex flex-col gap-1;
+  }
+
+  /* Table styles */
+  .data-table {
+    @apply w-full text-sm;
+  }
+
+  .data-table thead {
+    @apply border-b border-border;
+  }
+
+  .data-table th {
+    @apply text-left font-medium text-muted-foreground py-3 px-4;
+  }
+
+  .data-table td {
+    @apply py-3 px-4;
+  }
+
+  .data-table tbody tr {
+    @apply border-b border-border hover:bg-muted/50 transition-colors;
+  }
+
+  .data-table tbody tr:last-child {
+    @apply border-0;
+  }
+
+  /* Status badges */
+  .badge-paid {
+    @apply bg-success/10 text-success border border-success/20;
+  }
+
+  .badge-partial {
+    @apply bg-warning/10 text-warning border border-warning/20;
+  }
+
+  .badge-overdue {
+    @apply bg-destructive/10 text-destructive border border-destructive/20;
+  }
+
+  .badge-unpaid {
+    @apply bg-muted text-muted-foreground border border-border;
+  }
+}
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fade-in 0.2s ease-out;
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
