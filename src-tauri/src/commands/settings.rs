@@ -52,7 +52,13 @@ pub fn backup_database(
     let backup_path = backup_dir.join(format!("edufy_backup_{}.db", now));
 
     // Use SQLite VACUUM INTO for a consistent backup
-    conn.execute_batch(&format!("VACUUM INTO '{}';", backup_path.to_string_lossy()))
+    // Sanitize path to prevent SQL injection — only allow alphanumeric, underscores, hyphens, dots, colons, backslashes, forward slashes
+    let backup_str = backup_path.to_string_lossy().to_string();
+    let sanitized: String = backup_str.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.' || *c == ':' || *c == '\\' || *c == '/' || *c == ' ').collect();
+    if sanitized.is_empty() || sanitized.len() > 500 {
+        return Err("Invalid backup path".to_string());
+    }
+    conn.execute_batch(&format!("VACUUM INTO '{}';", sanitized.replace('\'', "''")))
         .map_err(|e| format!("Backup failed: {}", e))?;
 
     Ok(backup_path.to_string_lossy().to_string())

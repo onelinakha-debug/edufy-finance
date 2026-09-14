@@ -13,6 +13,19 @@ pub fn create_school(
     phone: Option<String>,
     email: Option<String>,
 ) -> Result<School, String> {
+    if name.trim().is_empty() { return Err("School name is required".to_string()); }
+    if name.len() > 200 { return Err("School name too long (max 200 characters)".to_string()); }
+    let valid_types = ["primary", "secondary", "combined"];
+    if !valid_types.contains(&school_type.as_str()) {
+        return Err(format!("Invalid school type '{}'. Must be one of: primary, secondary, combined", school_type));
+    }
+    if let Some(ref e) = email {
+        if !e.is_empty() && !e.contains('@') { return Err("Invalid email format".to_string()); }
+    }
+    if let Some(ref p) = phone {
+        if !p.is_empty() && p.len() < 10 { return Err("Phone number must be at least 10 characters".to_string()); }
+    }
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let id = generate_id();
     let now = chrono::Utc::now().to_rfc3339();

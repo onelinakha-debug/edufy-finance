@@ -24,22 +24,23 @@ pub fn get_collection_summary(
     let where_clause = filters.join(" AND ");
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
-    let total_invoiced: i64 = {
-        let sql = format!("SELECT COALESCE(SUM(i.net_amount), 0) FROM invoices i JOIN fee_structures fs ON i.fee_structure_id = fs.id WHERE {}", where_clause);
-        conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0)).map_err(|e| e.to_string())?
-    };
-
-    let total_discounted: i64 = {
-        let sql = format!("SELECT COALESCE(SUM(i.discount_amount), 0) FROM invoices i JOIN fee_structures fs ON i.fee_structure_id = fs.id WHERE {}", where_clause);
-        conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0)).map_err(|e| e.to_string())?
-    };
-
-    let total_paid: i64 = {
+    // Single consolidated query for all totals (was 3 separate queries)
+    let (total_invoiced, total_discounted, total_paid): (i64, i64, i64) = {
         let sql = format!(
-            "SELECT COALESCE(SUM(p.amount), 0) FROM payments p JOIN invoices i ON p.invoice_id = i.id JOIN fee_structures fs ON i.fee_structure_id = fs.id WHERE p.status = 'completed' AND {}",
-            where_clause
+            "SELECT
+                COALESCE(SUM(i.net_amount), 0),
+                COALESCE(SUM(i.discount_amount), 0),
+                COALESCE((SELECT SUM(p.amount) FROM payments p JOIN invoices pi ON p.invoice_id = pi.id
+                          JOIN fee_structures pfs ON pi.fee_structure_id = pfs.id
+                          WHERE p.status = 'completed' AND {}), 0)
+             FROM invoices i
+             JOIN fee_structures fs ON i.fee_structure_id = fs.id
+             WHERE {}",
+            where_clause, where_clause
         );
-        conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0)).map_err(|e| e.to_string())?
+        conn.query_row(&sql, param_refs.as_slice(), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        }).map_err(|e| e.to_string())?
     };
 
     let total_outstanding = total_invoiced - total_paid;
