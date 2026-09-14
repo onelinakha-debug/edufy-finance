@@ -15,6 +15,16 @@ pub fn create_student(
     stream: Option<String>,
     enrollment_date: Option<String>,
 ) -> Result<Student, String> {
+    // Input validation
+    if school_id.trim().is_empty() { return Err("School ID is required".to_string()); }
+    if admission_no.trim().is_empty() { return Err("Admission number is required".to_string()); }
+    if first_name.trim().is_empty() { return Err("First name is required".to_string()); }
+    if last_name.trim().is_empty() { return Err("Last name is required".to_string()); }
+    if grade.trim().is_empty() { return Err("Grade is required".to_string()); }
+    if admission_no.len() > 50 { return Err("Admission number too long (max 50 characters)".to_string()); }
+    if first_name.len() > 100 { return Err("First name too long (max 100 characters)".to_string()); }
+    if last_name.len() > 100 { return Err("Last name too long (max 100 characters)".to_string()); }
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
 
     // Check for duplicate admission number
@@ -188,12 +198,48 @@ pub fn get_student_detail(
 
     let outstanding_fees = total_invoiced - total_paid;
 
+    // Populate invoice summaries
+    let invoices: Vec<crate::models::InvoiceSummary> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT i.id, i.invoice_no, i.net_amount,
+                        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.invoice_id = i.id AND p.status = 'completed'), 0) as paid,
+                        i.status, COALESCE(s.grade, '') as grade, COALESCE(fs.term, 1), COALESCE(fs.academic_year, 2026)
+                 FROM invoices i
+                 LEFT JOIN students s ON i.student_id = s.id
+                 LEFT JOIN fee_structures fs ON i.fee_structure_id = fs.id
+                 WHERE i.student_id = ?1
+                 ORDER BY i.created_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([&id], |row| {
+            let net: i64 = row.get(2)?;
+            let paid: i64 = row.get(3)?;
+            Ok(crate::models::InvoiceSummary {
+                id: row.get(0)?,
+                invoice_no: row.get(1)?,
+                net_amount: net,
+                amount_paid: paid,
+                outstanding: net - paid,
+                status: row.get(4)?,
+                grade: row.get(5)?,
+                term: row.get(6)?,
+                academic_year: row.get(7)?,
+            })
+        }).map_err(|e| e.to_string())?;
+        let mut invs = Vec::new();
+        for row in rows {
+            invs.push(row.map_err(|e| e.to_string())?);
+        }
+        invs
+    };
+
     Ok(StudentDetail {
         student,
         parents,
         outstanding_fees: outstanding_fees.max(0),
         total_paid,
-        invoices: Vec::new(), // TODO: populate with invoice summaries
+        invoices,
     })
 }
 

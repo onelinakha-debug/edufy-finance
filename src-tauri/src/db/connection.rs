@@ -8,7 +8,7 @@ pub fn init_database(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
 
     // Enable WAL mode for better concurrent performance
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
 
     run_migrations(&conn)?;
 
@@ -32,6 +32,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             mpesa_paybill TEXT,
             mpesa_till    TEXT,
             logo_path     TEXT,
+            motto         TEXT,
             created_at    TEXT DEFAULT (datetime('now')),
             updated_at    TEXT DEFAULT (datetime('now'))
         );
@@ -197,45 +198,53 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             created_at   TEXT DEFAULT (datetime('now'))
         );
 
-        -- Schema v2: add motto to schools, add users table, add discount_configs table
         CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, applied_at TEXT DEFAULT (datetime('now')));
         ")?;
 
-    // Add motto column if not exists
-    let has_motto: bool = conn
-        .prepare("PRAGMA table_info(schools)")
-        .and_then(|mut stmt| {
-            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            for r in rows {
-                if r.unwrap_or_default() == "motto" {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        })
-        .unwrap_or(false);
+    // ═══ CRITICAL INDEXES ═══
 
-    if !has_motto {
-        conn.execute_batch("ALTER TABLE schools ADD COLUMN motto TEXT;")?;
-    }
-
-    // Ensure users table exists
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS users (
-            id            TEXT PRIMARY KEY,
-            school_id     TEXT NOT NULL REFERENCES schools(id),
-            username      TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            full_name     TEXT NOT NULL,
-            role          TEXT NOT NULL DEFAULT 'viewer',
-            is_active     INTEGER DEFAULT 1,
-            last_login    TEXT,
-            created_at    TEXT DEFAULT (datetime('now')),
-            UNIQUE(school_id, username)
-        );",
-    )?;
+        "
+        -- Students: most queried table
+        CREATE INDEX IF NOT EXISTS idx_students_school ON students(school_id);
+        CREATE INDEX IF NOT EXISTS idx_students_school_grade ON students(school_id, grade);
+        CREATE INDEX IF NOT EXISTS idx_students_status ON students(school_id, status);
 
-    // Ensure discount_configs table exists
+        -- Fee structures: filtered by school + year + term
+        CREATE INDEX IF NOT EXISTS idx_fee_structures_school ON fee_structures(school_id);
+        CREATE INDEX IF NOT EXISTS idx_fee_structures_school_year_term ON fee_structures(school_id, academic_year, term);
+
+        -- Vote heads: joined per fee structure
+        CREATE INDEX IF NOT EXISTS idx_vote_heads_fee_structure ON vote_heads(fee_structure_id);
+
+        -- Invoices: filtered by student, status, fee_structure
+        CREATE INDEX IF NOT EXISTS idx_invoices_student ON invoices(student_id);
+        CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);
+        CREATE INDEX IF NOT EXISTS idx_invoices_fee_structure ON invoices(fee_structure_id);
+        CREATE INDEX IF NOT EXISTS idx_invoices_student_fee ON invoices(student_id, fee_structure_id);
+
+        -- Payments: filtered by invoice, student, receipt
+        CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
+        CREATE INDEX IF NOT EXISTS idx_payments_student ON payments(student_id);
+        CREATE INDEX IF NOT EXISTS idx_payments_mpesa_receipt ON payments(mpesa_receipt);
+        CREATE INDEX IF NOT EXISTS idx_payments_invoice_status ON payments(invoice_id, status);
+
+        -- Grade promotions
+        CREATE INDEX IF NOT EXISTS idx_grade_promotions_school ON grade_promotions(school_id);
+
+        -- Users
+        CREATE INDEX IF NOT EXISTS idx_users_school ON users(school_id);
+
+        -- Discount configs
+        CREATE INDEX IF NOT EXISTS idx_discount_configs_school ON discount_configs(school_id);
+
+        -- M-Pesa
+        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_school ON mpesa_transactions(school_id);
+        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_checkout ON mpesa_transactions(checkout_request_id);
+        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_invoice ON mpesa_transactions(invoice_id);
+        ")?;
+
+    // Ensure discount_configs table exists (migration safety)
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS discount_configs (
             id              TEXT PRIMARY KEY,
@@ -249,10 +258,9 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         );",
     )?;
 
-    conn.execute_batch("        CREATE INDEX IF NOT EXISTS idx_users_school ON users(school_id);
-        CREATE INDEX IF NOT EXISTS idx_discount_configs_school ON discount_configs(school_id);
-
-        CREATE TABLE IF NOT EXISTS mpesa_configs (
+    // M-Pesa tables
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mpesa_configs (
             id                TEXT PRIMARY KEY,
             school_id         TEXT NOT NULL UNIQUE REFERENCES schools(id),
             consumer_key      TEXT NOT NULL,
@@ -281,11 +289,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             raw_callback            TEXT,
             created_at              TEXT DEFAULT (datetime('now')),
             updated_at              TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_school ON mpesa_transactions(school_id);
-        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_checkout ON mpesa_transactions(checkout_request_id);
-        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_invoice ON mpesa_transactions(invoice_id);")?;
+        );")?;
 
     Ok(())
 }

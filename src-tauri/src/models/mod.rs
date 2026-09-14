@@ -109,9 +109,19 @@ pub struct InvoiceSummary {
 pub struct InvoiceDetail {
     pub invoice: Invoice,
     pub items: Vec<InvoiceItem>,
-    pub payments: Vec<Payment>,
+    pub payments: Vec<InvoicePayment>,
     pub student_name: String,
     pub admission_no: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvoicePayment {
+    pub id: String,
+    pub payment_no: String,
+    pub amount: i64,
+    pub method: String,
+    pub mpesa_receipt: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,9 +164,30 @@ pub struct DashboardStats {
     pub total_collected: i64,
     pub total_outstanding: i64,
     pub collection_rate: f64,
-    pub recent_payments: Vec<Payment>,
-    pub top_outstanding: Vec<StudentOutstanding>,
+    pub recent_payments: Vec<RecentPayment>,
+    pub top_outstanding: Vec<TopOutstanding>,
     pub term_summary: TermSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentPayment {
+    pub id: String,
+    pub payment_no: String,
+    pub amount: i64,
+    pub method: String,
+    pub mpesa_receipt: Option<String>,
+    pub created_at: String,
+    pub student_name: String,
+    pub admission_no: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopOutstanding {
+    pub student_id: String,
+    pub student_name: String,
+    pub admission_no: String,
+    pub grade: String,
+    pub outstanding: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -202,80 +202,91 @@ async fn handle_confirmation(
                 );
             }
 
-            // Record the C2B transaction
-            let tx_id = generate_id();
-            let _ = conn.execute(
-                "INSERT INTO mpesa_transactions (id, school_id, invoice_id, phone, amount, account_reference, status, result_code, mpesa_receipt, raw_callback, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'completed', 0, ?7, ?8, ?9, ?9)",
-                rusqlite::params![
-                    tx_id, school_id, invoice_id, phone, amount, ref_num,
-                    trans_id, serde_json::to_string(&payload).unwrap_or_default(), now
-                ],
-            );
+            // Wrap all writes in a transaction for atomicity
+            if let Err(e) = conn.execute_batch("BEGIN") {
+                log::error!("C2B failed to begin transaction: {}", e);
+                return (StatusCode::OK, Json(serde_json::json!({"ResultCode": 0, "ResultDesc": "Accepted"})));
+            }
 
-            // Auto-record payment
-            let payment_id = generate_id();
-            let payment_no = format!("PAY-{}", &payment_id[..8].to_uppercase());
-            let receipt = format!("C2B-{}", trans_id);
+            let tx_result = (|| -> Result<(), String> {
+                let tx_id = generate_id();
+                conn.execute(
+                    "INSERT INTO mpesa_transactions (id, school_id, invoice_id, phone, amount, account_reference, status, result_code, mpesa_receipt, raw_callback, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'completed', 0, ?7, ?8, ?9, ?9)",
+                    rusqlite::params![
+                        tx_id, school_id, invoice_id, phone, amount, ref_num,
+                        trans_id, serde_json::to_string(&payload).unwrap_or_default(), now
+                    ],
+                ).map_err(|e| format!("Failed to record C2B transaction: {}", e))?;
 
-            let _ = conn.execute(
-                "INSERT INTO payments (id, payment_no, invoice_id, student_id, amount, method, mpesa_receipt, status, notes, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'mpesa', ?6, 'completed', 'Auto-recorded via C2B callback', ?7)",
-                rusqlite::params![payment_id, payment_no, invoice_id, student_id, amount, receipt, now],
-            );
+                // Auto-record payment
+                let payment_id = generate_id();
+                let payment_no = format!("PAY-{}", &payment_id[..8].to_uppercase());
+                let receipt = format!("C2B-{}", trans_id);
 
-            // Update invoice status
-            let (paid_total,): (i64,) = conn
-                .query_row(
-                    "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE invoice_id = ?1 AND status = 'completed'",
-                    rusqlite::params![invoice_id],
-                    |row| Ok((row.get(0)?,)),
-                )
-                .unwrap_or((0,));
+                conn.execute(
+                    "INSERT INTO payments (id, payment_no, invoice_id, student_id, amount, method, mpesa_receipt, status, notes, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'mpesa', ?6, 'completed', 'Auto-recorded via C2B callback', ?7)",
+                    rusqlite::params![payment_id, payment_no, invoice_id, student_id, amount, receipt, now],
+                ).map_err(|e| format!("Failed to record payment: {}", e))?;
 
-            let inv_status = if paid_total >= net_amount {
-                "paid"
-            } else if paid_total > 0 {
-                "partial"
-            } else {
-                "unpaid"
-            };
+                // Update invoice status
+                let (paid_total,): (i64,) = conn
+                    .query_row(
+                        "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE invoice_id = ?1 AND status = 'completed'",
+                        rusqlite::params![invoice_id],
+                        |row| Ok((row.get(0)?,)),
+                    )
+                    .map_err(|e| format!("Failed to calculate paid total: {}", e))?;
 
-            let paid_at = if inv_status == "paid" {
-                Some(now.clone())
-            } else {
-                None
-            };
+                let inv_status = if paid_total >= net_amount {
+                    "paid"
+                } else if paid_total > 0 {
+                    "partial"
+                } else {
+                    "unpaid"
+                };
 
-            let _ = conn.execute(
-                "UPDATE invoices SET status = ?1, paid_at = ?2 WHERE id = ?3",
-                rusqlite::params![inv_status, paid_at, invoice_id],
-            );
+                let paid_at = if inv_status == "paid" { Some(now.clone()) } else { None };
 
-            log::info!(
-                "C2B payment recorded: {} KES for invoice {} (status: {})",
-                amount,
-                ref_num,
-                inv_status
-            );
+                conn.execute(
+                    "UPDATE invoices SET status = ?1, paid_at = ?2 WHERE id = ?3",
+                    rusqlite::params![inv_status, paid_at, invoice_id],
+                ).map_err(|e| format!("Failed to update invoice status: {}", e))?;
+
+                Ok(())
+            })();
+
+            match tx_result {
+                Ok(()) => {
+                    let _ = conn.execute_batch("COMMIT");
+                    log::info!("C2B payment recorded: {} KES for invoice {} (status: matched)", amount, ref_num);
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    log::error!("C2B transaction failed: {}", e);
+                }
+            }
         } else {
             // No matching invoice — record as unmatched C2B payment
             let tx_id = generate_id();
             let school_id = get_first_school_id(&conn).unwrap_or_default();
 
-            let _ = conn.execute(
+            if let Err(e) = conn.execute(
                 "INSERT INTO mpesa_transactions (id, school_id, phone, amount, account_reference, status, result_code, mpesa_receipt, raw_callback, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, 'unmatched', 0, ?6, ?7, ?8, ?8)",
                 rusqlite::params![
                     tx_id, school_id, phone, amount, ref_num, trans_id,
                     serde_json::to_string(&payload).unwrap_or_default(), now
                 ],
-            );
-
-            log::warn!(
-                "C2B payment received but no matching invoice for ref: {} — saved as unmatched",
-                ref_num
-            );
+            ) {
+                log::error!("C2B failed to record unmatched payment: {}", e);
+            } else {
+                log::warn!(
+                    "C2B payment received but no matching invoice for ref: {} — saved as unmatched",
+                    ref_num
+                );
+            }
         }
     }
 

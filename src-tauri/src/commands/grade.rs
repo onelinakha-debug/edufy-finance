@@ -145,47 +145,66 @@ pub fn promote_students(
 ) -> Result<GradePromotion, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
 
-    let ids = student_ids.unwrap_or_default();
-    let count = if ids.is_empty() {
-        // Promote all students in the grade
-        let c: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM students WHERE school_id = ?1 AND grade = ?2 AND status = 'active'",
-                rusqlite::params![school_id, from_grade],
-                |row| row.get(0),
+    // Wrap in transaction
+    conn.execute("BEGIN", []).map_err(|e| e.to_string())?;
+
+    let result = (|| -> Result<i32, String> {
+        let ids = student_ids.unwrap_or_default();
+        let count = if ids.is_empty() {
+            let c: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM students WHERE school_id = ?1 AND grade = ?2 AND status = 'active'",
+                    rusqlite::params![school_id, from_grade],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+
+            conn.execute(
+                "UPDATE students SET grade = ?1 WHERE school_id = ?2 AND grade = ?3 AND status = 'active'",
+                rusqlite::params![to_grade, school_id, from_grade],
             )
             .map_err(|e| e.to_string())?;
 
-        conn.execute(
-            "UPDATE students SET grade = ?1 WHERE school_id = ?2 AND grade = ?3 AND status = 'active'",
-            rusqlite::params![to_grade, school_id, from_grade],
-        )
-        .map_err(|e| e.to_string())?;
+            c as i32
+        } else {
+            let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "UPDATE students SET grade = ?1 WHERE id IN ({}) AND school_id = ?2",
+                placeholders
+            );
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(to_grade.clone()), Box::new(school_id.clone())];
+            for id in &ids {
+                params.push(Box::new(id.clone()));
+            }
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            conn.execute(&sql, param_refs.as_slice()).map_err(|e| e.to_string())?;
+            ids.len() as i32
+        };
+        Ok(count)
+    })();
 
-        c as i32
-    } else {
-        let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "UPDATE students SET grade = ?1 WHERE id IN ({}) AND school_id = ?2",
-            placeholders
-        );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(to_grade.clone()), Box::new(school_id.clone())];
-        for id in &ids {
-            params.push(Box::new(id.clone()));
-        }
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        conn.execute(&sql, param_refs.as_slice()).map_err(|e| e.to_string())?;
-        ids.len() as i32
+    let count = match result {
+        Ok(c) => c,
+        Err(e) => { let _ = conn.execute("ROLLBACK", []); return Err(e); }
     };
 
     let id = generate_id();
     let now = chrono::Utc::now().to_rfc3339();
 
-    conn.execute(
+    let insert_result = conn.execute(
         "INSERT INTO grade_promotions (id, school_id, from_grade, to_grade, student_count, academic_year, promoted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![id, school_id, from_grade, to_grade, count, academic_year, now],
-    )
-    .map_err(|e| e.to_string())?;
+        rusqlite::params![id, school_id, from_grade.clone(), to_grade.clone(), count, academic_year, now],
+    ).map_err(|e| e.to_string());
+
+    match insert_result {
+        Ok(_) => {
+            conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e);
+        }
+    }
 
     Ok(GradePromotion {
         id,

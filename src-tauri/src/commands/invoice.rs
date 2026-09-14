@@ -39,9 +39,11 @@ pub fn get_invoices(
 
     sql.push_str(" ORDER BY created_at DESC");
 
-    let lim = limit.unwrap_or(100);
-    let off = offset.unwrap_or(0);
-    sql.push_str(&format!(" LIMIT {} OFFSET {}", lim, off));
+    let lim = limit.unwrap_or(100).min(1000);
+    let off = offset.unwrap_or(0).max(0);
+    sql.push_str(" LIMIT ? OFFSET ?");
+    params.push(Box::new(lim));
+    params.push(Box::new(off));
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -122,6 +124,28 @@ pub fn get_invoice_detail(
         items
     };
 
+    // Get payments for this invoice
+    let payments: Vec<crate::models::InvoicePayment> = {
+        let mut stmt = conn
+            .prepare("SELECT id, payment_no, amount, method, mpesa_receipt, created_at
+                      FROM payments WHERE invoice_id = ?1 AND status = 'completed'
+                      ORDER BY created_at DESC")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([&id], |row| {
+            Ok(crate::models::InvoicePayment {
+                id: row.get(0)?,
+                payment_no: row.get(1)?,
+                amount: row.get(2)?,
+                method: row.get(3)?,
+                mpesa_receipt: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        }).map_err(|e| e.to_string())?;
+        let mut payments = Vec::new();
+        for row in rows { payments.push(row.map_err(|e| e.to_string())?); }
+        payments
+    };
+
     // Get student info
     let (student_name, admission_no): (String, String) = {
         let mut stmt = conn
@@ -134,7 +158,7 @@ pub fn get_invoice_detail(
     Ok(InvoiceDetail {
         invoice,
         items,
-        payments: Vec::new(),
+        payments,
         student_name,
         admission_no,
     })

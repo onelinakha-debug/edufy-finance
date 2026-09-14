@@ -36,8 +36,25 @@ pub fn set_setting(
 pub fn backup_database(
     state: State<'_, DbState>,
 ) -> Result<String, String> {
-    let _conn = state.0.lock().map_err(|e| e.to_string())?;
-    let backup_path = std::path::PathBuf::from("edufy-backup.db");
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+
+    // Get the database path
+    let db_path = conn
+        .pragma_query_value(None, "database_list", |row| row.get::<_, String>(2))
+        .map_err(|e| format!("Failed to get database path: {}", e))?;
+
+    // Create backup filename with timestamp
+    let now = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let backup_dir = std::path::PathBuf::from(&db_path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let backup_path = backup_dir.join(format!("edufy_backup_{}.db", now));
+
+    // Use SQLite VACUUM INTO for a consistent backup
+    conn.execute_batch(&format!("VACUUM INTO '{}';", backup_path.to_string_lossy()))
+        .map_err(|e| format!("Backup failed: {}", e))?;
+
     Ok(backup_path.to_string_lossy().to_string())
 }
 
@@ -176,7 +193,30 @@ pub fn create_user(
     full_name: String,
     role: String,
 ) -> Result<User, String> {
+    // Input validation
+    if school_id.trim().is_empty() { return Err("School ID is required".to_string()); }
+    if username.trim().is_empty() { return Err("Username is required".to_string()); }
+    if username.len() < 3 { return Err("Username must be at least 3 characters".to_string()); }
+    if username.len() > 50 { return Err("Username too long (max 50 characters)".to_string()); }
+    if password.len() < 6 { return Err("Password must be at least 6 characters".to_string()); }
+    if full_name.trim().is_empty() { return Err("Full name is required".to_string()); }
+    let valid_roles = ["admin", "bursar", "teacher", "viewer"];
+    if !valid_roles.contains(&role.as_str()) {
+        return Err(format!("Invalid role '{}'. Must be one of: admin, bursar, teacher, viewer", role));
+    }
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+
+    // Check for duplicate username in same school
+    let exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM users WHERE school_id = ?1 AND username = ?2",
+        rusqlite::params![school_id, username],
+        |row| row.get(0),
+    ).unwrap_or(false);
+    if exists {
+        return Err(format!("Username '{}' already exists in this school", username));
+    }
+
     let id = generate_id();
     let now = chrono::Utc::now().to_rfc3339();
     // Simple hash for MVP - in production use bcrypt/argon2

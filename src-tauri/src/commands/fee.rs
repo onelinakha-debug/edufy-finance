@@ -12,6 +12,12 @@ pub fn create_fee_structure(
     term: i32,
     academic_year: i32,
 ) -> Result<FeeStructure, String> {
+    if school_id.trim().is_empty() { return Err("School ID is required".to_string()); }
+    if name.trim().is_empty() { return Err("Name is required".to_string()); }
+    if grade.trim().is_empty() { return Err("Grade is required".to_string()); }
+    if !(1..=4).contains(&term) { return Err("Term must be between 1 and 4".to_string()); }
+    if academic_year < 2020 || academic_year > 2100 { return Err("Invalid academic year".to_string()); }
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let id = generate_id();
     let now = chrono::Utc::now().to_rfc3339();
@@ -95,6 +101,11 @@ pub fn add_vote_head(
     is_mandatory: Option<bool>,
     sort_order: Option<i32>,
 ) -> Result<VoteHead, String> {
+    if fee_structure_id.trim().is_empty() { return Err("Fee structure ID is required".to_string()); }
+    if name.trim().is_empty() { return Err("Vote head name is required".to_string()); }
+    if category.trim().is_empty() { return Err("Category is required".to_string()); }
+    if amount < 0 { return Err("Amount cannot be negative".to_string()); }
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let id = generate_id();
     let mandatory = is_mandatory.unwrap_or(true);
@@ -197,6 +208,15 @@ pub fn add_discount_config(
     min_students: i32,
     is_active: bool,
 ) -> Result<DiscountConfig, String> {
+    if school_id.trim().is_empty() { return Err("School ID is required".to_string()); }
+    if name.trim().is_empty() { return Err("Discount name is required".to_string()); }
+    let valid_types = ["sibling", "staff", "scholarship", "early_payment", "government", "other"];
+    if !valid_types.contains(&discount_type.as_str()) {
+        return Err(format!("Invalid discount type '{}'. Must be one of: {}", discount_type, valid_types.join(", ")));
+    }
+    if rate < 0.0 || rate > 100.0 { return Err("Rate must be between 0 and 100".to_string()); }
+    if min_students < 1 { return Err("Minimum students must be at least 1".to_string()); }
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let id = generate_id();
 

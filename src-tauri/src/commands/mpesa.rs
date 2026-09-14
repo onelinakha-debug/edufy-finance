@@ -54,17 +54,38 @@ pub fn save_mpesa_config(
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Upsert: delete existing then insert
-    conn.execute("DELETE FROM mpesa_configs WHERE school_id = ?1", rusqlite::params![school_id])
-        .map_err(|e| e.to_string())?;
+    // Upsert: delete existing then insert — wrapped in transaction
+    conn.execute("BEGIN", []).map_err(|e| e.to_string())?;
+    let result = (|| -> Result<(), String> {
+        conn.execute("DELETE FROM mpesa_configs WHERE school_id = ?1", rusqlite::params![school_id])
+            .map_err(|e| e.to_string())?;
 
-    let id = generate_id();
-    conn.execute(
-        "INSERT INTO mpesa_configs (id, school_id, consumer_key, consumer_secret, passkey, shortcode, callback_url, is_active, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8)",
-        rusqlite::params![id, school_id, consumer_key, consumer_secret, passkey, shortcode, callback_url, now],
-    )
-    .map_err(|e| e.to_string())?;
+        let id = generate_id();
+        conn.execute(
+            "INSERT INTO mpesa_configs (id, school_id, consumer_key, consumer_secret, passkey, shortcode, callback_url, is_active, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8)",
+            rusqlite::params![id, school_id, consumer_key, consumer_secret, passkey, shortcode, callback_url, now],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e);
+        }
+    }
+
+    // Re-read the config to return the canonical version
+    let id = conn.query_row(
+        "SELECT id FROM mpesa_configs WHERE school_id = ?1",
+        rusqlite::params![school_id],
+        |row| row.get::<_, String>(0),
+    ).map_err(|e| e.to_string())?;
 
     Ok(MpesaConfig {
         id,
@@ -211,28 +232,27 @@ pub async fn check_mpesa_status(
     state: State<'_, DbState>,
     transaction_id: String,
 ) -> Result<MpesaTransaction, String> {
-    let (school_id, checkout_request_id, invoice_id, amount) = {
+    // Single lock acquisition — read all needed data at once
+    let (_school_id, checkout_request_id, invoice_id, amount, consumer_key, consumer_secret, passkey, shortcode) = {
         let conn = state.0.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
+        let (school_id, checkout_request_id, invoice_id, amount): (String, Option<String>, Option<String>, i64) = conn.query_row(
             "SELECT school_id, checkout_request_id, invoice_id, amount FROM mpesa_transactions WHERE id = ?1",
             rusqlite::params![transaction_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .map_err(|e| format!("Transaction not found: {}", e))?
-    };
+        .map_err(|e| format!("Transaction not found: {}", e))?;
 
-    let checkout_id = checkout_request_id.ok_or("No checkout request ID")?;
-
-    // Get config
-    let (consumer_key, consumer_secret, passkey, shortcode) = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
+        let (consumer_key, consumer_secret, passkey, shortcode): (String, String, String, String) = conn.query_row(
             "SELECT consumer_key, consumer_secret, passkey, shortcode FROM mpesa_configs WHERE school_id = ?1",
             rusqlite::params![school_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
         )
-        .map_err(|e| format!("M-Pesa config not found: {}", e))?
+        .map_err(|e| format!("M-Pesa config not found: {}", e))?;
+
+        (school_id, checkout_request_id, invoice_id, amount, consumer_key, consumer_secret, passkey, shortcode)
     };
+
+    let checkout_id = checkout_request_id.ok_or("No checkout request ID")?;
 
     let client = DarajaClient::new();
     let access_token = client.get_access_token(&consumer_key, &consumer_secret).await?;
@@ -242,66 +262,83 @@ pub async fn check_mpesa_status(
     let result_desc = query_response.result_desc.unwrap_or_default();
 
     let (status, _mpesa_receipt): (&str, Option<String>) = match result_code {
-        "0" => ("completed", None), // Receipt will be set from callback
-        "1032" => ("pending", None), // Transaction still processing
-        "1037" => ("pending", None), // Timeout, still processing
-        "1" => ("failed", None),    // Insufficient balance
-        "2001" => ("failed", None), // Wrong credentials
+        "0" => ("completed", None),
+        "1032" => ("pending", None),
+        "1037" => ("pending", None),
+        "1" => ("failed", None),
+        "2001" => ("failed", None),
         _ => ("failed", None),
     };
 
-    // Update transaction
+    // Update transaction + auto-record payment in a single lock with transaction
     let now = chrono::Utc::now().to_rfc3339();
     {
         let conn = state.0.lock().map_err(|e| e.to_string())?;
         let result_code_int: Option<i32> = result_code.parse().ok();
-        conn.execute(
-            "UPDATE mpesa_transactions SET status = ?1, result_code = ?2, result_description = ?3, updated_at = ?4 WHERE id = ?5",
-            rusqlite::params![status, result_code_int, result_desc, now, transaction_id],
-        )
-        .map_err(|e| e.to_string())?;
 
-        // If completed, auto-record payment
-        if status == "completed" {
-            if let Some(ref inv_id) = invoice_id {
-                // Get student_id
-                let student_id: String = conn.query_row(
-                    "SELECT student_id FROM invoices WHERE id = ?1",
-                    rusqlite::params![inv_id],
-                    |row| row.get(0),
-                ).map_err(|e| e.to_string())?;
+        conn.execute("BEGIN", []).map_err(|e| e.to_string())?;
+        let tx_result = (|| -> Result<(), String> {
+            conn.execute(
+                "UPDATE mpesa_transactions SET status = ?1, result_code = ?2, result_description = ?3, updated_at = ?4 WHERE id = ?5",
+                rusqlite::params![status, result_code_int, result_desc, now, transaction_id],
+            )
+            .map_err(|e| e.to_string())?;
 
-                let payment_id = generate_id();
-                let payment_no = format!("PAY-{}", &payment_id[..8].to_uppercase());
-                let receipt = format!("MPESA-{}", &transaction_id[..8].to_uppercase());
-
-                conn.execute(
-                    "INSERT INTO payments (id, payment_no, invoice_id, student_id, amount, method, mpesa_receipt, status, notes, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'mpesa', ?6, 'completed', 'Auto-recorded via Daraja STK Push', ?7)",
-                    rusqlite::params![payment_id, payment_no, inv_id, student_id, amount, receipt, now],
-                ).map_err(|e| e.to_string())?;
-
-                // Update invoice status
-                let (net, paid): (i64, i64) = {
-                    let mut stmt = conn.prepare(
-                        "SELECT i.net_amount, COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.invoice_id = i.id AND p.status = 'completed'), 0) FROM invoices i WHERE i.id = ?1"
+            // If completed, auto-record payment
+            if status == "completed" {
+                if let Some(ref inv_id) = invoice_id {
+                    let student_id: String = conn.query_row(
+                        "SELECT student_id FROM invoices WHERE id = ?1",
+                        rusqlite::params![inv_id],
+                        |row| row.get(0),
                     ).map_err(|e| e.to_string())?;
-                    stmt.query_row([inv_id], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|e| e.to_string())?
-                };
 
-                let inv_status = if paid >= net { "paid" } else if paid > 0 { "partial" } else { "unpaid" };
-                let paid_at = if inv_status == "paid" { Some(now.clone()) } else { None };
-                conn.execute(
-                    "UPDATE invoices SET status = ?1, paid_at = ?2 WHERE id = ?3",
-                    rusqlite::params![inv_status, paid_at, inv_id],
-                ).map_err(|e| e.to_string())?;
+                    // Check for duplicate payment
+                    let existing: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM payments WHERE mpesa_receipt = ?1 AND status = 'completed'",
+                        rusqlite::params![transaction_id],
+                        |row| row.get(0),
+                    ).map_err(|e| e.to_string())?;
 
-                // Update mpesa receipt
-                conn.execute(
-                    "UPDATE mpesa_transactions SET mpesa_receipt = ?1 WHERE id = ?2",
-                    rusqlite::params![receipt, transaction_id],
-                ).map_err(|e| e.to_string())?;
+                    if existing == 0 {
+                        let payment_id = generate_id();
+                        let payment_no = format!("PAY-{}", &payment_id[..8].to_uppercase());
+                        let receipt = format!("MPESA-{}", &transaction_id[..8].to_uppercase());
+
+                        conn.execute(
+                            "INSERT INTO payments (id, payment_no, invoice_id, student_id, amount, method, mpesa_receipt, status, notes, created_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5, 'mpesa', ?6, 'completed', 'Auto-recorded via Daraja STK Push', ?7)",
+                            rusqlite::params![payment_id, payment_no, inv_id, student_id, amount, receipt, now],
+                        ).map_err(|e| e.to_string())?;
+
+                        // Update invoice status
+                        let (net, paid): (i64, i64) = conn.query_row(
+                            "SELECT i.net_amount, COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.invoice_id = i.id AND p.status = 'completed'), 0) FROM invoices i WHERE i.id = ?1",
+                            rusqlite::params![inv_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        ).map_err(|e| e.to_string())?;
+
+                        let inv_status = if paid >= net { "paid" } else if paid > 0 { "partial" } else { "unpaid" };
+                        let paid_at = if inv_status == "paid" { Some(now.clone()) } else { None };
+                        conn.execute(
+                            "UPDATE invoices SET status = ?1, paid_at = ?2 WHERE id = ?3",
+                            rusqlite::params![inv_status, paid_at, inv_id],
+                        ).map_err(|e| e.to_string())?;
+
+                        // Update mpesa receipt
+                        conn.execute(
+                            "UPDATE mpesa_transactions SET mpesa_receipt = ?1 WHERE id = ?2",
+                            rusqlite::params![receipt, transaction_id],
+                        ).map_err(|e| e.to_string())?;
+                    }
+                }
             }
+            Ok(())
+        })();
+
+        match tx_result {
+            Ok(()) => { let _ = conn.execute("COMMIT", []); }
+            Err(e) => { let _ = conn.execute("ROLLBACK", []); return Err(e); }
         }
     }
 
@@ -532,53 +569,61 @@ pub async fn match_c2b_payment(
 
     let conn = state.0.lock().map_err(|e| e.to_string())?;
 
-    // Update the mpesa transaction to link to this invoice
-    conn.execute(
-        "UPDATE mpesa_transactions SET invoice_id = ?1, status = 'completed', updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![invoice_id, now, transaction_id],
-    )
-    .map_err(|e| e.to_string())?;
+    // Wrap all writes in a transaction
+    conn.execute("BEGIN", []).map_err(|e| e.to_string())?;
 
-    // Record payment
-    let payment_id = generate_id();
-    let payment_no = format!("PAY-{}", &payment_id[..8].to_uppercase());
-    let receipt = tx_receipt.unwrap_or_else(|| format!("C2B-{}", &transaction_id[..8].to_uppercase()));
-
-    conn.execute(
-        "INSERT INTO payments (id, payment_no, invoice_id, student_id, amount, method, mpesa_receipt, status, notes, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'mpesa', ?6, 'completed', 'Matched from C2B payment', ?7)",
-        rusqlite::params![payment_id, payment_no, invoice_id, student_id, tx_amount, receipt, now],
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Update invoice status
-    let (paid_total,): (i64,) = conn
-        .query_row(
-            "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE invoice_id = ?1 AND status = 'completed'",
-            rusqlite::params![invoice_id],
-            |row| Ok((row.get(0)?,)),
+    let tx_result = (|| -> Result<(), String> {
+        // Update the mpesa transaction to link to this invoice
+        conn.execute(
+            "UPDATE mpesa_transactions SET invoice_id = ?1, status = 'completed', updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![invoice_id, now, transaction_id],
         )
-        .unwrap_or((0,));
+        .map_err(|e| e.to_string())?;
 
-    let inv_status = if paid_total >= net_amount {
-        "paid"
-    } else if paid_total > 0 {
-        "partial"
-    } else {
-        "unpaid"
-    };
+        // Record payment
+        let payment_id = generate_id();
+        let payment_no = format!("PAY-{}", &payment_id[..8].to_uppercase());
+        let receipt = tx_receipt.unwrap_or_else(|| format!("C2B-{}", &transaction_id[..8].to_uppercase()));
 
-    let paid_at = if inv_status == "paid" {
-        Some(now.clone())
-    } else {
-        None
-    };
+        conn.execute(
+            "INSERT INTO payments (id, payment_no, invoice_id, student_id, amount, method, mpesa_receipt, status, notes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'mpesa', ?6, 'completed', 'Matched from C2B payment', ?7)",
+            rusqlite::params![payment_id, payment_no, invoice_id, student_id, tx_amount, receipt, now],
+        )
+        .map_err(|e| e.to_string())?;
 
-    conn.execute(
-        "UPDATE invoices SET status = ?1, paid_at = ?2 WHERE id = ?3",
-        rusqlite::params![inv_status, paid_at, invoice_id],
-    )
-    .map_err(|e| e.to_string())?;
+        // Update invoice status
+        let (paid_total,): (i64,) = conn
+            .query_row(
+                "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE invoice_id = ?1 AND status = 'completed'",
+                rusqlite::params![invoice_id],
+                |row| Ok((row.get(0)?,)),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let inv_status = if paid_total >= net_amount {
+            "paid"
+        } else if paid_total > 0 {
+            "partial"
+        } else {
+            "unpaid"
+        };
+
+        let paid_at = if inv_status == "paid" { Some(now.clone()) } else { None };
+
+        conn.execute(
+            "UPDATE invoices SET status = ?1, paid_at = ?2 WHERE id = ?3",
+            rusqlite::params![inv_status, paid_at, invoice_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        Ok(())
+    })();
+
+    match tx_result {
+        Ok(()) => { let _ = conn.execute("COMMIT", []); }
+        Err(e) => { let _ = conn.execute("ROLLBACK", []); return Err(e); }
+    }
 
     // Return updated transaction
     conn.query_row(

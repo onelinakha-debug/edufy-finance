@@ -18,7 +18,27 @@ pub fn record_payment(
         return Err("Payment amount must be greater than 0".to_string());
     }
 
+    let valid_methods = ["cash", "mpesa", "bank", "cheque"];
+    if !valid_methods.contains(&method.as_str()) {
+        return Err(format!("Invalid payment method '{}'. Must be one of: cash, mpesa, bank, cheque", method));
+    }
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+
+    // Check for duplicate M-Pesa receipt BEFORE any writes
+    if let Some(ref receipt) = mpesa_receipt {
+        if !receipt.trim().is_empty() {
+            let existing: i64 = {
+                let mut stmt = conn
+                    .prepare("SELECT COUNT(*) FROM payments WHERE mpesa_receipt = ?1 AND status = 'completed'")
+                    .map_err(|e| e.to_string())?;
+                stmt.query_row([receipt.as_str()], |row| row.get(0)).map_err(|e| e.to_string())?
+            };
+            if existing > 0 {
+                return Err(format!("M-Pesa receipt '{}' has already been recorded", receipt));
+            }
+        }
+    }
 
     // Get student_id and outstanding balance from invoice
     let (student_id, net_amount): (String, i64) = {
@@ -42,50 +62,50 @@ pub fn record_payment(
         return Err(format!("Amount {} exceeds outstanding balance of {}", amount, outstanding));
     }
 
-    // Check for duplicate M-Pesa receipt
-    if let Some(ref receipt) = mpesa_receipt {
-        if !receipt.trim().is_empty() {
-            let existing: i64 = {
-                let mut stmt = conn
-                    .prepare("SELECT COUNT(*) FROM payments WHERE mpesa_receipt = ?1 AND status = 'completed'")
-                    .map_err(|e| e.to_string())?;
-                stmt.query_row([receipt.as_str()], |row| row.get(0)).map_err(|e| e.to_string())?
-            };
-            if existing > 0 {
-                return Err(format!("M-Pesa receipt '{}' has already been recorded", receipt));
-            }
-        }
-    }
-
     let id = generate_id();
     let now = chrono::Utc::now().to_rfc3339();
     let payment_no = format!("PAY-{}", &id[..8].to_uppercase());
 
-    conn.execute(
-        "INSERT INTO payments (id, payment_no, invoice_id, student_id, amount, method, reference, mpesa_receipt, status, notes, received_by, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'completed', ?9, ?10, ?11)",
-        rusqlite::params![id, payment_no, invoice_id, student_id, amount, method, reference, mpesa_receipt, notes, received_by, now],
-    )
-    .map_err(|e| e.to_string())?;
+    // Wrap INSERT + UPDATE in a transaction for atomicity
+    conn.execute("BEGIN", []).map_err(|e| e.to_string())?;
 
-    // Update invoice status
-    update_invoice_status(&conn, &invoice_id).map_err(|e| e.to_string())?;
+    let result = (|| -> Result<(), String> {
+        conn.execute(
+            "INSERT INTO payments (id, payment_no, invoice_id, student_id, amount, method, reference, mpesa_receipt, status, notes, received_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'completed', ?9, ?10, ?11)",
+            rusqlite::params![id, payment_no, invoice_id, student_id, amount, method, reference, mpesa_receipt, notes, received_by, now],
+        )
+        .map_err(|e| e.to_string())?;
 
-    Ok(Payment {
-        id,
-        payment_no,
-        invoice_id,
-        student_id,
-        amount,
-        method,
-        reference,
-        mpesa_receipt,
-        status: "completed".to_string(),
-        notes,
-        received_by,
-        created_at: now,
-        confirmed_at: None,
-    })
+        update_invoice_status(&conn, &invoice_id).map_err(|e| e.to_string())?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
+            Ok(Payment {
+                id,
+                payment_no,
+                invoice_id,
+                student_id,
+                amount,
+                method,
+                reference,
+                mpesa_receipt,
+                status: "completed".to_string(),
+                notes,
+                received_by,
+                created_at: now,
+                confirmed_at: None,
+            })
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -98,24 +118,29 @@ pub fn get_payments(
 ) -> Result<Vec<Payment>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
 
-    let mut sql = "SELECT id, payment_no, invoice_id, student_id, amount, method, reference, mpesa_receipt, status, notes, received_by, created_at, confirmed_at
-                   FROM payments WHERE 1=1".to_string();
+    let mut sql = "SELECT p.id, p.payment_no, p.invoice_id, p.student_id, p.amount, p.method, p.reference, p.mpesa_receipt, p.status, p.notes, p.received_by, p.created_at, p.confirmed_at,
+                   p.student_id, s.first_name, s.last_name, s.admission_no
+                   FROM payments p
+                   LEFT JOIN students s ON p.student_id = s.id
+                   WHERE 1=1".to_string();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(s) = &student_id {
-        sql.push_str(" AND student_id = ?");
+        sql.push_str(" AND p.student_id = ?");
         params.push(Box::new(s.clone()));
     }
     if let Some(m) = &method {
-        sql.push_str(" AND method = ?");
+        sql.push_str(" AND p.method = ?");
         params.push(Box::new(m.clone()));
     }
 
-    sql.push_str(" ORDER BY created_at DESC");
+    sql.push_str(" ORDER BY p.created_at DESC");
 
-    let lim = limit.unwrap_or(100);
-    let off = offset.unwrap_or(0);
-    sql.push_str(&format!(" LIMIT {} OFFSET {}", lim, off));
+    let lim = limit.unwrap_or(100).min(1000);
+    let off = offset.unwrap_or(0).max(0);
+    sql.push_str(" LIMIT ? OFFSET ?");
+    params.push(Box::new(lim));
+    params.push(Box::new(off));
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -200,7 +225,7 @@ pub fn get_payment_detail(
     })
 }
 
-fn update_invoice_status(conn: &rusqlite::Connection, invoice_id: &str) -> Result<(), rusqlite::Error> {
+pub fn update_invoice_status(conn: &rusqlite::Connection, invoice_id: &str) -> Result<(), rusqlite::Error> {
     let (net_amount, paid): (i64, i64) = {
         let mut stmt = conn.prepare(
             "SELECT i.net_amount,

@@ -80,6 +80,10 @@ pub fn generate_invoices_for_structure(
         students
     };
 
+    if students.is_empty() {
+        return Ok(Vec::new());
+    }
+
     // Get vote heads for this fee structure
     let vote_heads = {
         let mut stmt = conn.prepare(
@@ -100,6 +104,24 @@ pub fn generate_invoices_for_structure(
         vhs
     };
 
+    // BATCH FIX: Get all existing invoice student+structure pairs in ONE query
+    let student_ids_in_scope: Vec<String> = students.iter().map(|s| s.0.clone()).collect();
+    let existing_invoices: std::collections::HashSet<String> = {
+        let placeholders: Vec<String> = student_ids_in_scope.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "SELECT student_id FROM invoices WHERE fee_structure_id = ?1 AND student_id IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(fee_structure_id.to_string())];
+        for id in &student_ids_in_scope {
+            params.push(Box::new(id.clone()));
+        }
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
     // Get current invoice count for this school (for sequential numbering)
     let school_id = &fee_structure.1;
     let invoice_count: i64 = {
@@ -111,61 +133,66 @@ pub fn generate_invoices_for_structure(
         stmt.query_row([school_id], |row| row.get(0))?
     };
 
-    let mut invoices = Vec::new();
+    // BEGIN TRANSACTION for batch insert
+    conn.execute("BEGIN", [])?;
 
-    for (idx, student) in students.iter().enumerate() {
-        // Check if invoice already exists for this student + fee structure
-        let exists: bool = {
-            let mut stmt = conn.prepare(
-                "SELECT COUNT(*) FROM invoices WHERE student_id = ?1 AND fee_structure_id = ?2",
-            )?;
-            let count: i64 = stmt.query_row(
-                rusqlite::params![student.0, fee_structure_id],
-                |row| row.get(0),
-            )?;
-            count > 0
-        };
+    let result = (|| -> AppResult<Vec<Invoice>> {
+        let mut invoices = Vec::new();
 
-        if exists {
-            continue; // Skip if already invoiced
-        }
+        for (idx, student) in students.iter().enumerate() {
+            // Skip if already invoiced
+            if existing_invoices.contains(&student.0) {
+                continue;
+            }
 
-        let total_amount: i64 = vote_heads.iter().map(|vh| vh.2).sum();
-        let invoice_no = generate_sequential("INV", invoice_count + idx as i64 + 1);
-        let invoice_id = generate_id();
-        let now = chrono::Utc::now().to_rfc3339();
+            let total_amount: i64 = vote_heads.iter().map(|vh| vh.2).sum();
+            let invoice_no = generate_sequential("INV", invoice_count + idx as i64 + 1);
+            let invoice_id = generate_id();
+            let now = chrono::Utc::now().to_rfc3339();
 
-        // Insert invoice
-        conn.execute(
-            "INSERT INTO invoices (id, invoice_no, student_id, fee_structure_id, total_amount, net_amount, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'unpaid', ?6)",
-            rusqlite::params![invoice_id, invoice_no, student.0, fee_structure_id, total_amount, now],
-        )?;
-
-        // Insert invoice items
-        for vh in &vote_heads {
-            let item_id = generate_id();
+            // Insert invoice
             conn.execute(
-                "INSERT INTO invoice_items (id, invoice_id, vote_head_id, amount, description)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![item_id, invoice_id, vh.0, vh.2, vh.1],
+                "INSERT INTO invoices (id, invoice_no, student_id, fee_structure_id, total_amount, net_amount, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'unpaid', ?6)",
+                rusqlite::params![invoice_id, invoice_no, student.0, fee_structure_id, total_amount, now],
             )?;
+
+            // Insert invoice items
+            for vh in &vote_heads {
+                let item_id = generate_id();
+                conn.execute(
+                    "INSERT INTO invoice_items (id, invoice_id, vote_head_id, amount, description)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![item_id, invoice_id, vh.0, vh.2, vh.1],
+                )?;
+            }
+
+            invoices.push(Invoice {
+                id: invoice_id,
+                invoice_no,
+                student_id: student.0.clone(),
+                fee_structure_id: fee_structure_id.to_string(),
+                total_amount,
+                discount_amount: 0,
+                net_amount: total_amount,
+                status: "unpaid".to_string(),
+                due_date: None,
+                created_at: now,
+                paid_at: None,
+            });
         }
 
-        invoices.push(Invoice {
-            id: invoice_id,
-            invoice_no,
-            student_id: student.0.clone(),
-            fee_structure_id: fee_structure_id.to_string(),
-            total_amount,
-            discount_amount: 0,
-            net_amount: total_amount,
-            status: "unpaid".to_string(),
-            due_date: None,
-            created_at: now,
-            paid_at: None,
-        });
-    }
+        Ok(invoices)
+    })();
 
-    Ok(invoices)
+    match result {
+        Ok(invoices) => {
+            conn.execute("COMMIT", [])?;
+            Ok(invoices)
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
 }
