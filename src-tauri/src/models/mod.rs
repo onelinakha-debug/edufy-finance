@@ -364,6 +364,63 @@ pub struct MpesaTransaction {
     pub updated_at: String,
 }
 
+// ═══ WHATSAPP / PAYMENT LINKS ═══
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct WhatsAppSession {
+    pub id: String,
+    pub school_id: String,
+    pub parent_phone: String,
+    pub parent_id: Option<String>,
+    pub student_id: Option<String>,
+    pub state: String,
+    pub context_json: Option<String>,
+    pub expires_at: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhatsAppOutbox {
+    pub id: String,
+    pub school_id: String,
+    pub parent_phone: String,
+    pub channel: String,
+    pub template_name: String,
+    pub params_json: String,
+    pub status: String,
+    pub meta_msg_id: Option<String>,
+    pub retry_count: i32,
+    pub scheduled_for: Option<String>,
+    pub created_at: String,
+    pub sent_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentLink {
+    pub token: String,
+    pub school_id: String,
+    pub invoice_id: String,
+    pub phone: String,
+    pub amount: i64,
+    pub expires_at: String,
+    pub used_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParentBalance {
+    pub student_id: String,
+    pub admission_no: String,
+    pub student_name: String,
+    pub grade: String,
+    pub term: i32,
+    pub academic_year: i32,
+    pub invoiced: i64,
+    pub paid: i64,
+    pub outstanding: i64,
+}
+
 // ═══ C2B ═══
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

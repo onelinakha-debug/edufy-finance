@@ -210,6 +210,24 @@ export const settingsApi = {
     cmd<void>("delete_user", { userId }),
 };
 
+// ═══ WHATSAPP BOT + PAYMENT LINKS ═══
+export const whatsappApi = {
+  balances: (phone: string) =>
+    cmd<any[]>("lookup_parent_balances", { phone }),
+  generateLink: (schoolId: string, invoiceId: string, phone: string) =>
+    cmd<any>("generate_payment_link", { schoolId, invoiceId, phone }),
+  enqueue: (schoolId: string, parentPhone: string, templateName: string, paramsJson?: string) =>
+    cmd<any>("enqueue_whatsapp", { schoolId, parentPhone, templateName, paramsJson }),
+};
+
+export const payApi = {
+  snapshot: async (token: string) => {
+    const res = await fetch(`/pay/${encodeURIComponent(token)}`);
+    if (!res.ok) throw new Error(res.status === 404 ? "Payment link not found" : `Request failed: ${res.status}`);
+    return res.json();
+  },
+};
+
 // ═══ GRADES ═══
 export const gradeApi = {
   create: (schoolId: string, name: string, level: string, sortOrder?: number) =>

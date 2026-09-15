@@ -8,3 +8,4 @@ pub mod report;
 pub mod school;
 pub mod settings;
 pub mod student;
+pub mod whatsapp;

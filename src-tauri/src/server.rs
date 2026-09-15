@@ -1,12 +1,14 @@
 use axum::{
-    extract::{State as AxumState, Request},
-    http::{header, StatusCode, Method},
+    extract::{Path, Query, State as AxumState, Request},
+    http::{header, StatusCode, Method, HeaderMap},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
+    body::Bytes,
     Json, Router,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
@@ -16,6 +18,7 @@ use crate::auth;
 use crate::commands;
 use crate::db::connection::DbState;
 use crate::models::User;
+use crate::services::whatsapp as wa;
 
 // ═══ SHARED STATE ═══
 
@@ -49,7 +52,13 @@ async fn auth_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let path = request.uri().path().to_string();
-    if path == "/api/auth/login" || path == "/health" {
+
+    // Public routes: login, health, WhatsApp webhook, public pay page
+    if path == "/api/auth/login"
+        || path == "/health"
+        || path == "/webhook/whatsapp"
+        || path.starts_with("/pay/")
+    {
         return Ok(next.run(request).await);
     }
 
@@ -139,10 +148,259 @@ struct PromoteStudentsReq { school_id: String, from_grade: String, to_grade: Str
 struct CountStudentsReq { school_id: String, grade: String }
 #[derive(Deserialize)]
 struct LoginReq { username: String, password: String, school_id: String }
+#[derive(Deserialize)]
+struct GenerateLinkReq { school_id: String, invoice_id: String, phone: String }
+#[derive(Deserialize)]
+struct EnqueueWaReq { school_id: String, parent_phone: String, template_name: String, params_json: Option<String> }
 
 // ═══ HANDLERS ═══
 
 async fn health() -> &'static str { "OK" }
+
+// ═══ WHATSAPP WEBHOOK (public) ═══
+
+/// Meta verification handshake: GET /webhook/whatsapp?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...
+async fn whatsapp_verify(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let mode = q.get("hub.mode").map(|s| s.as_str()).unwrap_or("");
+    let token = q.get("hub.verify_token").map(|s| s.as_str()).unwrap_or("");
+    let challenge = q.get("hub.challenge").cloned().unwrap_or_default();
+    let expected = std::env::var("WHATSAPP_VERIFY_TOKEN").unwrap_or_default();
+    if mode == "subscribe" && !expected.is_empty() && token == expected && !challenge.is_empty() {
+        return challenge.into_response();
+    }
+    StatusCode::FORBIDDEN.into_response()
+}
+
+/// Incoming message handler: verifies HMAC, spawns async processing, returns 200 fast.
+async fn whatsapp_webhook(
+    AxumState(s): AxumState<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let sig = headers
+        .get("x-hub-signature-256")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let secret = std::env::var("WHATSAPP_APP_SECRET").unwrap_or_default();
+    if !secret.is_empty() && !wa::verify_meta_signature(&secret, &body, sig) {
+        log::warn!("WhatsApp webhook: bad signature");
+        return StatusCode::FORBIDDEN;
+    }
+    let payload: wa::WhatsAppIncoming = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(_) => return StatusCode::OK, // ack non-message callbacks (e.g. status updates)
+    };
+    let state = s.clone();
+    tokio::spawn(async move {
+        handle_wa_inbound(state, payload).await;
+    });
+    StatusCode::OK
+}
+
+/// Core inbound logic: BALANCE / admission-no / PAY / RECEIPT keywords.
+async fn handle_wa_inbound(state: Arc<AppState>, payload: wa::WhatsAppIncoming) {
+    let (phone_raw, text_raw) = match wa::extract_inbound(&payload) {
+        Some(v) => v,
+        None => return,
+    };
+    let phone = match wa::normalize_ke_phone(&phone_raw) {
+        Some(p) => p,
+        None => return,
+    };
+    log::info!("WhatsApp inbound from {}", wa::mask_phone(&phone));
+    let text = text_raw.trim().to_lowercase();
+
+    // Balance lookup
+    let balances = {
+        let conn = match lock_db(&state) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        commands::whatsapp::lookup_parent_balances_inner(&conn, &phone).unwrap_or_default()
+    };
+
+    let reply: String = if text == "balance" || text == "bal" || text == "fee" || text == "ada" {
+        build_balance_reply(&balances)
+    } else if text == "pay" || text == "lipa" {
+        build_pay_reply(&state, &balances).await
+    } else if text.chars().all(|c| c.is_ascii_digit()) && (3..=10).contains(&text.len()) {
+        // Admission-no lookup: match against linked children
+        let hit: Vec<_> = balances.iter().filter(|b| b.admission_no == text_raw.trim()).collect();
+        if hit.is_empty() {
+            "I couldn't find that admission number on this phone number. Reply BALANCE to see linked children, or contact your bursar to link your number.".to_string()
+        } else {
+            build_balance_reply(&hit.into_iter().cloned().collect::<Vec<_>>())
+        }
+    } else if text.starts_with("btn:") {
+        match text.as_str() {
+            "btn:pay_mpesa" => build_pay_reply(&state, &balances).await,
+            "btn:talk_bursar" => bursar_contact(&state),
+            _ => build_balance_reply(&balances),
+        }
+    } else if ["hi", "hello", "start", "menu", "help", "msaada"].contains(&text.as_str()) {
+        help_text().to_string()
+    } else {
+        help_text().to_string()
+    };
+
+    // Persist to outbox (audit + retry) and attempt direct send
+    let school_id = balances.first().map(|b| {
+        // resolve school via student
+        let conn = lock_db(&state).ok()?;
+        conn.query_row(
+            "SELECT school_id FROM students WHERE id = ?1",
+            rusqlite::params![b.student_id],
+            |row| row.get::<_, String>(0),
+        ).ok()
+    }).flatten().unwrap_or_default();
+
+    if !school_id.is_empty() {
+        if let Ok(conn) = lock_db(&state) {
+            let params = serde_json::json!({"body": reply}).to_string();
+            let _ = commands::whatsapp::enqueue_outbox_inner(
+                &conn, &school_id, &phone, "bot_reply", &params, None,
+            );
+        }
+    }
+
+    if let Some(cfg) = wa::WhatsAppConfig::from_env() {
+        if cfg.is_configured() {
+            if let Err(e) = wa::send_text(&cfg, &phone, &reply).await {
+                log::warn!("WhatsApp direct send failed for {}: {}", wa::mask_phone(&phone), e);
+            }
+        }
+    }
+}
+
+fn build_balance_reply(balances: &[crate::models::ParentBalance]) -> String {
+    if balances.is_empty() {
+        return "I couldn't find any children linked to this number. Reply with your child's admission number (e.g. 34567), or ask your bursar to link your number.".to_string();
+    }
+    let mut out = String::from("📋 *Fee Balance*\n─────────────────\n");
+    for b in balances {
+        out.push_str(&format!(
+            "{} ({}, Adm: {})\nInvoiced: {}\nPaid: {}\nBalance: *{}* {}\n─────────────────\n",
+            b.student_name, b.grade, b.admission_no,
+            wa::format_kes(b.invoiced),
+            wa::format_kes(b.paid),
+            wa::format_kes(b.outstanding),
+            if b.outstanding > 0 { "⚠️" } else { "✅" },
+        ));
+    }
+    out.push_str("Reply PAY for an M-Pesa link, or STATEMENT for a full statement.");
+    out
+}
+
+async fn build_pay_reply(state: &Arc<AppState>, balances: &[crate::models::ParentBalance]) -> String {
+    let target = balances.iter().find(|b| b.outstanding > 0);
+    let b = match target {
+        Some(v) => v,
+        None => return "✅ All balances are cleared. Asante!".to_string(),
+    };
+    // Oldest unpaid invoice for this student
+    let inv_id: Option<String> = lock_db(state).ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT id FROM invoices WHERE student_id = ?1 AND status IN ('unpaid','partial') ORDER BY created_at ASC LIMIT 1",
+            rusqlite::params![b.student_id],
+            |row| row.get(0),
+        ).ok()
+    });
+    let inv_id = match inv_id {
+        Some(id) => id,
+        None => return format!("Balance for {} is {}. Ask the bursar to raise an invoice.", b.student_name, wa::format_kes(b.outstanding)),
+    };
+    let school_id: String = lock_db(state).ok().and_then(|conn| {
+        conn.query_row("SELECT school_id FROM students WHERE id = ?1", rusqlite::params![b.student_id], |row| row.get(0)).ok()
+    }).unwrap_or_default();
+
+    let token: String = match lock_db(state) {
+        Ok(conn) => match commands::whatsapp::generate_payment_link_inner(&conn, &school_id, &inv_id, &b.admission_no) {
+            Ok(link) => link.token,
+            Err(e) => return format!("Couldn't create a payment link: {}", e),
+        },
+        Err(_) => return "Service busy, try again in a minute.".to_string(),
+    };
+    // NOTE: phone stored on link is a placeholder here; /pay page lets parent edit it.
+    let base = std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| "https://pay.edufy.finance".into());
+    format!(
+        "💳 *Pay {} for {}*\nTap to pay (valid 10 min):\n{}/pay/{}\n\nYou'll get an M-Pesa prompt on your phone. Enter your PIN to complete.",
+        wa::format_kes(b.outstanding), b.student_name, base.trim_end_matches('/'), token
+    )
+}
+
+fn bursar_contact(state: &Arc<AppState>) -> String {
+    let info: (String, String) = lock_db(state).ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT COALESCE((SELECT value FROM settings WHERE key='school_phone'), ''), COALESCE((SELECT value FROM settings WHERE key='school_hours'), '')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).ok()
+    }).unwrap_or_default();
+    let (phone, hours) = info;
+    if !phone.is_empty() {
+        format!("💬 Bursar: {}\nHours: {}\nOr reply BALANCE to check fees anytime.", phone, if hours.is_empty() { "Mon–Fri 7am–5pm" } else { &hours })
+    } else {
+        "💬 Contact your school bursar Mon–Fri 7am–5pm. Reply BALANCE to check fees anytime.".to_string()
+    }
+}
+
+fn help_text() -> &'static str {
+    "👋 *Edufy Fee Bot*\nReply:\n• BALANCE — fee balance\n• PAY — M-Pesa pay link\n• STATEMENT — full statement\n• BURSAR — school contact"
+}
+
+// ═══ PAYMENT LINKS (public snapshot + authed generation) ═══
+
+#[derive(Deserialize)]
+struct PhoneReq { phone: String }
+
+async fn wa_balances(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<PhoneReq>,
+) -> Result<Json<Vec<crate::models::ParentBalance>>, AppError> {
+    let conn = lock_db(&s)?;
+    Ok(Json(commands::whatsapp::lookup_parent_balances_inner(&conn, &a.phone).map_err(AppError)?))
+}
+
+async fn generate_link(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<GenerateLinkReq>,
+) -> Result<Json<crate::models::PaymentLink>, AppError> {
+    let conn = lock_db(&s)?;
+    Ok(Json(commands::whatsapp::generate_payment_link_inner(&conn, &a.school_id, &a.invoice_id, &a.phone).map_err(AppError)?))
+}
+
+async fn pay_snapshot(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let conn = lock_db(&s)?;
+    let link = commands::whatsapp::resolve_payment_link_inner(&conn, &token).map_err(AppError)?;
+    let (invoice_no, student_name, adm): (String, String, String) = conn.query_row(
+        "SELECT i.invoice_no, s.first_name || ' ' || s.last_name, s.admission_no
+         FROM invoices i JOIN students s ON s.id = i.student_id WHERE i.id = ?1",
+        rusqlite::params![link.invoice_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(|e| AppError(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "invoice_no": invoice_no,
+        "student_name": student_name,
+        "admission_no": adm,
+        "amount": link.amount,
+        "phone": link.phone,
+        "expires_at": link.expires_at,
+    })))
+}
+
+async fn enqueue_wa(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<EnqueueWaReq>,
+) -> Result<Json<crate::models::WhatsAppOutbox>, AppError> {
+    let conn = lock_db(&s)?;
+    Ok(Json(commands::whatsapp::enqueue_outbox_inner(
+        &conn, &a.school_id, &a.parent_phone, &a.template_name,
+        &a.params_json.unwrap_or_else(|| "{}".into()), None,
+    ).map_err(AppError)?))
+}
 
 async fn login_handler(
     AxumState(s): AxumState<Arc<AppState>>,
@@ -428,6 +686,10 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/create_user", post(create_user))
         .route("/update_user", post(update_user))
         .route("/delete_user", post(delete_user))
+        // WhatsApp bot + payment links
+        .route("/whatsapp/balances", post(wa_balances))
+        .route("/whatsapp/generate-link", post(generate_link))
+        .route("/whatsapp/enqueue", post(enqueue_wa))
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -439,6 +701,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/auth/login", post(login_handler))
+        .route("/webhook/whatsapp", get(whatsapp_verify).post(whatsapp_webhook))
+        .route("/pay/:token", get(pay_snapshot))
         .nest("/api", api_router())
         .fallback_service(ServeDir::new("dist").append_index_html_on_directories(true))
         .layer(cors)

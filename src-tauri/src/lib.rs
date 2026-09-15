@@ -108,6 +108,10 @@ pub fn run() {
             commands::dashboard::get_dashboard_stats,
             // Auth
             commands::settings::login,
+            // WhatsApp bot + payment links
+            commands::whatsapp::lookup_parent_balances,
+            commands::whatsapp::generate_payment_link,
+            commands::whatsapp::enqueue_whatsapp,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Edufy Finance");

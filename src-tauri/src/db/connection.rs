@@ -290,7 +290,54 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         -- M-Pesa indexes (after table creation)
         CREATE INDEX IF NOT EXISTS idx_mpesa_tx_school ON mpesa_transactions(school_id);
         CREATE INDEX IF NOT EXISTS idx_mpesa_tx_checkout ON mpesa_transactions(checkout_request_id);
-        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_invoice ON mpesa_transactions(invoice_id);")?;
+        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_invoice ON mpesa_transactions(invoice_id);
+
+        -- WhatsApp bot sessions (short-lived, TTL enforced by cleanup)
+        CREATE TABLE IF NOT EXISTS whatsapp_sessions (
+            id              TEXT PRIMARY KEY,
+            school_id       TEXT NOT NULL REFERENCES schools(id),
+            parent_phone    TEXT NOT NULL,
+            parent_id       TEXT REFERENCES parents(id),
+            student_id      TEXT REFERENCES students(id),
+            state           TEXT NOT NULL DEFAULT 'main_menu',
+            context_json    TEXT,
+            expires_at      TEXT NOT NULL,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_wa_sess_phone ON whatsapp_sessions(parent_phone);
+        CREATE INDEX IF NOT EXISTS idx_wa_sess_expires ON whatsapp_sessions(expires_at);
+
+        -- Unified outbound queue (WhatsApp primary, SMS fallback)
+        CREATE TABLE IF NOT EXISTS whatsapp_outbox (
+            id              TEXT PRIMARY KEY,
+            school_id       TEXT NOT NULL REFERENCES schools(id),
+            parent_phone    TEXT NOT NULL,
+            channel         TEXT NOT NULL DEFAULT 'whatsapp',
+            template_name   TEXT NOT NULL,
+            params_json     TEXT NOT NULL DEFAULT '{}',
+            status          TEXT NOT NULL DEFAULT 'pending',
+            meta_msg_id     TEXT,
+            retry_count     INTEGER NOT NULL DEFAULT 0,
+            scheduled_for   TEXT,
+            created_at      TEXT DEFAULT (datetime('now')),
+            sent_at         TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_wa_outbox_status ON whatsapp_outbox(status);
+        CREATE INDEX IF NOT EXISTS idx_wa_outbox_sched ON whatsapp_outbox(scheduled_for);
+
+        -- Single-use STK Push payment links (10-min TTL)
+        CREATE TABLE IF NOT EXISTS payment_links (
+            token           TEXT PRIMARY KEY,
+            school_id       TEXT NOT NULL REFERENCES schools(id),
+            invoice_id      TEXT NOT NULL REFERENCES invoices(id),
+            phone           TEXT NOT NULL,
+            amount          INTEGER NOT NULL,
+            expires_at      TEXT NOT NULL,
+            used_at         TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_paylink_expires ON payment_links(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_paylink_invoice ON payment_links(invoice_id);")?;
 
     Ok(())
 }
