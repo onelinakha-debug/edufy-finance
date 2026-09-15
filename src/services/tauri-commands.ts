@@ -255,6 +255,30 @@ export const payApi = {
   },
 };
 
+// ═══ CAPITATION + COMPLIANCE ═══
+export const capitationApi = {
+  preview: (schoolId: string, items: { admissionNo: string; amount: number }[]) =>
+    cmd<any[]>("preview_capitation", { schoolId, items }),
+  apply: (schoolId: string, term: number, academicYear: number, items: { admissionNo: string; amount: number }[], sourceFilename?: string, appliedBy?: string) =>
+    cmd<any>("apply_capitation", { schoolId, term, academicYear, items, sourceFilename, appliedBy }),
+  batches: (schoolId: string) =>
+    cmd<any[]>("list_capitation_batches", { schoolId }),
+};
+
+export const gazetteApi = {
+  report: (schoolId: string, academicYear: number, term: number) =>
+    cmd<any[]>("gazette_return", { schoolId, academicYear, term }),
+  setCap: (schoolId: string, category: string, capAmount: number) =>
+    cmd<void>("set_fee_cap", { schoolId, category, capAmount }),
+};
+
+// ═══ DOCUMENT VAULT ═══
+export const documentsApi = {
+  upload: (schoolId: string, kind: string, refId: string, filename: string, pdfBase64: string) =>
+    cmd<{ token: string; kind: string; ref_id: string; filename: string; expires_at: string }>("store_document", { schoolId, kind, refId, filename, pdfBase64 }),
+  publicUrl: (token: string) => `/doc/${encodeURIComponent(token)}`,
+};
+
 // ═══ GRADES ═══
 export const gradeApi = {
   create: (schoolId: string, name: string, level: string, sortOrder?: number) =>

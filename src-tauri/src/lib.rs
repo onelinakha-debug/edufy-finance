@@ -118,6 +118,14 @@ pub fn run() {
             commands::whatsapp::reveal_link_code,
             commands::whatsapp::sweep_reminders,
             commands::whatsapp::whatsapp_status,
+            // Capitation + compliance
+            commands::capitation::preview_capitation,
+            commands::capitation::apply_capitation,
+            commands::capitation::list_capitation_batches,
+            commands::capitation::gazette_return,
+            commands::capitation::set_fee_cap,
+            // Document vault
+            commands::documents::store_document,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Edufy Finance");

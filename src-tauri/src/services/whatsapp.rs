@@ -240,6 +240,45 @@ pub async fn send_interactive_buttons(
     post_graph(cfg, &payload).await
 }
 
+// ═══ DOCUMENT BY URL (receipts / statements) ═══
+
+#[derive(Debug, Serialize)]
+struct DocumentMsg {
+    messaging_product: String,
+    to: String,
+    #[serde(rename = "type")]
+    msg_type: String,
+    document: DocumentBody,
+}
+
+#[derive(Debug, Serialize)]
+struct DocumentBody {
+    link: String,
+    filename: String,
+    caption: Option<String>,
+}
+
+/// Send a PDF hosted at a public URL (e.g. our /doc/:token vault).
+pub async fn send_document_by_url(
+    cfg: &WhatsAppConfig,
+    to: &str,
+    doc_url: &str,
+    filename: &str,
+    caption: Option<&str>,
+) -> Result<Option<String>, String> {
+    let payload = DocumentMsg {
+        messaging_product: "whatsapp".into(),
+        to: to.into(),
+        msg_type: "document".into(),
+        document: DocumentBody {
+            link: doc_url.into(),
+            filename: filename.into(),
+            caption: caption.map(|s| s.to_string()),
+        },
+    };
+    post_graph(cfg, &payload).await
+}
+
 // ═══ INCOMING WEBHOOK TYPES (minimal subset) ═══
 
 #[derive(Debug, Deserialize, Default)]

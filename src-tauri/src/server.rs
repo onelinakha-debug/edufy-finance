@@ -53,11 +53,12 @@ async fn auth_middleware(
 ) -> Result<Response, StatusCode> {
     let path = request.uri().path().to_string();
 
-    // Public routes: login, health, WhatsApp webhook, public pay page
+    // Public routes: login, health, WhatsApp webhook, public pay + doc links
     if path == "/api/auth/login"
         || path == "/health"
         || path == "/webhook/whatsapp"
         || path.starts_with("/pay/")
+        || path.starts_with("/doc/")
     {
         return Ok(next.run(request).await);
     }
@@ -635,8 +636,7 @@ async fn wa_sweep_reminders(
 async fn wa_status(
     AxumState(s): AxumState<Arc<AppState>>,
     _: Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let conn = lock_db(&s)?;
+) -> Result<Json<serde_json::Value>, AppError> {    let conn = lock_db(&s)?;
     let pending: i64 = conn.query_row(
         "SELECT COUNT(*) FROM whatsapp_outbox WHERE status = 'pending'",
         [],
@@ -656,6 +656,112 @@ async fn wa_status(
     })))
 }
 
+// ═══ CAPITATION + GAZETTE + DOCUMENTS ═══
+
+#[derive(Deserialize)]
+struct CapitationFileReq {
+    school_id: String,
+    term: Option<i32>,
+    academic_year: Option<i32>,
+    items: Vec<crate::models::CapitationItem>,
+    source_filename: Option<String>,
+    applied_by: Option<String>,
+}
+
+async fn capitation_preview(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<CapitationFileReq>,
+) -> Result<Json<Vec<crate::models::CapitationPreviewItem>>, AppError> {
+    let conn = lock_db(&s)?;
+    Ok(Json(commands::capitation::preview_capitation_inner(&conn, &a.school_id, &a.items).map_err(AppError)?))
+}
+
+async fn capitation_apply(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<CapitationFileReq>,
+) -> Result<Json<crate::models::CapitationApplyResult>, AppError> {
+    let term = a.term.ok_or_else(|| AppError("term is required".to_string()))?;
+    let year = a.academic_year.ok_or_else(|| AppError("academic_year is required".to_string()))?;
+    let conn = lock_db(&s)?;
+    Ok(Json(commands::capitation::apply_capitation_inner(
+        &conn, &a.school_id, term, year, &a.items, a.source_filename, a.applied_by,
+    ).map_err(AppError)?))
+}
+
+async fn capitation_batches(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<SchoolIdReq>,
+) -> Result<Json<Vec<crate::models::CapitationBatch>>, AppError> {
+    let conn = lock_db(&s)?;
+    Ok(Json(commands::capitation::list_capitation_batches_inner(&conn, &a.school_id).map_err(AppError)?))
+}
+
+#[derive(Deserialize)]
+struct GazetteReq { school_id: String, academic_year: i32, term: i32 }
+
+async fn gazette_return(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<GazetteReq>,
+) -> Result<Json<Vec<crate::models::GazetteCategory>>, AppError> {
+    let conn = lock_db(&s)?;
+    Ok(Json(commands::capitation::gazette_return_inner(&conn, &a.school_id, a.academic_year, a.term).map_err(AppError)?))
+}
+
+#[derive(Deserialize)]
+struct SetCapReq { school_id: String, category: String, cap_amount: i64 }
+
+async fn set_fee_cap(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<SetCapReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let conn = lock_db(&s)?;
+    commands::capitation::set_fee_cap_inner(&conn, &a.school_id, &a.category, a.cap_amount).map_err(AppError)?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct DocUploadReq {
+    school_id: String,
+    kind: String,
+    ref_id: String,
+    filename: String,
+    pdf_base64: String,
+}
+
+async fn document_upload(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<DocUploadReq>,
+) -> Result<Json<crate::models::StoredDocument>, AppError> {
+    let conn = lock_db(&s)?;
+    Ok(Json(commands::documents::store_document_inner(
+        &conn, &a.school_id, &a.kind, &a.ref_id, &a.filename, &a.pdf_base64,
+    ).map_err(AppError)?))
+}
+
+/// Public expiring PDF serve: GET /doc/:token
+async fn doc_serve(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> impl IntoResponse {
+    let data: Result<(Vec<u8>, String), AppError> = (|| {
+        let conn = lock_db(&s)?;
+        commands::documents::resolve_document_inner(&conn, &token).map_err(AppError)
+    })();
+    match data {
+        Ok((bytes, filename)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/pdf")
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!("inline; filename=\"{}\"", filename.replace('"', "")),
+            )
+            .body(axum::body::Body::from(bytes))
+            .unwrap()
+            .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
 // ═══ OUTBOX WORKER (WhatsApp primary, SMS fallback) ═══
 
 struct OutboxJob {
@@ -664,12 +770,6 @@ struct OutboxJob {
     template_name: String,
     params_json: String,
     retry_count: i32,
-}
-
-fn outbox_body(params_json: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(params_json).ok()
-        .and_then(|v| v.get("body")?.as_str().map(|s| s.to_string()))
-        .filter(|s| !s.is_empty())
 }
 
 async fn drain_outbox_once(state: &Arc<AppState>) {
@@ -690,32 +790,46 @@ async fn drain_outbox_once(state: &Arc<AppState>) {
     let sms_cfg = crate::services::sms::SmsConfig::from_env();
 
     for job in jobs {
-        let body = match outbox_body(&job.params_json) {
-            Some(b) => b,
-            None => {
-                if let Ok(conn) = lock_db(state) {
-                    let _ = conn.execute(
-                        "UPDATE whatsapp_outbox SET status='failed', retry_count=retry_count+1 WHERE id=?1",
-                        rusqlite::params![job.id],
-                    );
-                }
-                continue;
-            }
-        };
+        let params: serde_json::Value =
+            serde_json::from_str(&job.params_json).unwrap_or(serde_json::Value::Null);
+        let doc_url = params.get("document_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+        let body = params.get("body").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
 
-        // 1) WhatsApp attempt
+        if doc_url.is_none() && body.is_none() {
+            if let Ok(conn) = lock_db(state) {
+                let _ = conn.execute(
+                    "UPDATE whatsapp_outbox SET status='failed', retry_count=retry_count+1 WHERE id=?1",
+                    rusqlite::params![job.id],
+                );
+            }
+            continue;
+        }
+
+        // 1) WhatsApp attempt (document or text)
         let mut sent_via: Option<(&str, Option<String>)> = None;
         if let Some(cfg) = wa_cfg.as_ref() {
-            match wa::send_text(cfg, &job.parent_phone, &body).await {
+            let res = if let Some(url) = doc_url {
+                let filename = params.get("filename").and_then(|v| v.as_str()).unwrap_or("document.pdf");
+                let caption = params.get("caption").and_then(|v| v.as_str());
+                wa::send_document_by_url(cfg, &job.parent_phone, url, filename, caption).await
+            } else {
+                wa::send_text(cfg, &job.parent_phone, body.unwrap_or("")).await
+            };
+            match res {
                 Ok(msg_id) => sent_via = Some(("whatsapp", msg_id)),
                 Err(e) => log::warn!("outbox {} ({}) wa send failed (try {}): {}", job.id, job.template_name, job.retry_count, e),
             }
         }
 
-        // 2) SMS fallback after 2 failed WhatsApp attempts
+        // 2) SMS fallback after 2 failed WhatsApp attempts (text only; documents fall back to link text)
         if sent_via.is_none() && job.retry_count >= 2 {
             if let Some(cfg) = sms_cfg.as_ref() {
-                match crate::services::sms::send_sms(cfg, &job.parent_phone, &body).await {
+                let sms_body = if let Some(url) = doc_url {
+                    format!("{}: {}", body.unwrap_or("Your document is ready"), url)
+                } else {
+                    body.unwrap_or("").to_string()
+                };
+                match crate::services::sms::send_sms(cfg, &job.parent_phone, &sms_body).await {
                     Ok(()) => sent_via = Some(("sms", None)),
                     Err(e) => log::warn!("outbox {} sms fallback failed: {}", job.id, e),
                 }
@@ -1083,6 +1197,14 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/whatsapp/reveal-code", post(wa_reveal_code))
         .route("/whatsapp/sweep-reminders", post(wa_sweep_reminders))
         .route("/whatsapp/status", post(wa_status))
+        // Capitation + compliance
+        .route("/capitation/preview", post(capitation_preview))
+        .route("/capitation/apply", post(capitation_apply))
+        .route("/capitation/batches", post(capitation_batches))
+        .route("/reports/gazette", post(gazette_return))
+        .route("/reports/set-fee-cap", post(set_fee_cap))
+        // Document vault
+        .route("/documents/upload", post(document_upload))
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -1098,6 +1220,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/pay/:token", get(pay_snapshot))
         .route("/pay/:token/confirm", post(pay_confirm))
         .route("/pay/status/:transaction_id", get(pay_status))
+        .route("/doc/:token", get(doc_serve))
         .nest("/api", api_router())
         .fallback_service(ServeDir::new("dist").append_index_html_on_directories(true))
         .layer(cors)

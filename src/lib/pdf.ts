@@ -5,6 +5,7 @@ interface ReceiptData {
   schoolName: string;
   schoolAddress?: string;
   schoolPhone?: string;
+  schoolPin?: string;
   receiptNo: string;
   paymentNo: string;
   studentName: string;
@@ -23,6 +24,20 @@ interface ReceiptData {
 }
 
 export function generateReceipt(data: ReceiptData): void {
+  const doc = buildReceiptDoc(data);
+  // Save
+  doc.save(`receipt-${data.receiptNo}.pdf`);
+}
+
+/** Build the receipt PDF and return raw base64 (for upload / WhatsApp delivery). */
+export function generateReceiptBase64(data: ReceiptData): string {
+  const doc = buildReceiptDoc(data);
+  const uri = doc.output("datauristring");
+  const comma = uri.indexOf(",");
+  return comma >= 0 ? uri.slice(comma + 1) : uri;
+}
+
+function buildReceiptDoc(data: ReceiptData) {
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.getWidth();
 
@@ -42,6 +57,11 @@ export function generateReceipt(data: ReceiptData): void {
   }
   if (data.schoolPhone) {
     doc.text(`Tel: ${data.schoolPhone}`, pageWidth / 2, 33, { align: "center" });
+  }
+  if (data.schoolPin) {
+    doc.setFontSize(9);
+    doc.text(`KRA PIN: ${data.schoolPin}`, pageWidth / 2, data.schoolPhone ? 38 : 33, { align: "center" });
+    doc.setFontSize(10);
   }
 
   // Receipt title
@@ -161,8 +181,7 @@ export function generateReceipt(data: ReceiptData): void {
     doc.text("Authorized Signature", leftCol, y + 4);
   }
 
-  // Save
-  doc.save(`receipt-${data.receiptNo}.pdf`);
+  return doc;
 }
 
 export function generateReportPdf(

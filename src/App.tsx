@@ -10,6 +10,7 @@ import StudentsPage from "@/pages/students";
 import FeesPage from "@/pages/fees";
 import PaymentsPage from "@/pages/payments";
 import ReportsPage from "@/pages/reports";
+import CapitationPage from "@/pages/capitation";
 import SettingsPage from "@/pages/settings";
 import NotFoundPage from "@/pages/not-found";
 
@@ -121,6 +122,7 @@ export default function App() {
           <Route path="/fees" element={<FeesPage />} />
           <Route path="/payments" element={<PaymentsPage />} />
           <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/capitation" element={<CapitationPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>

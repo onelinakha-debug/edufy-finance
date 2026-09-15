@@ -441,6 +441,66 @@ pub struct PendingLinkRequest {
     pub created_at: String,
 }
 
+// ═══ CAPITATION / COMPLIANCE / DOCUMENTS ═══
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapitationItem {
+    pub admission_no: String,
+    pub amount: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapitationPreviewItem {
+    pub admission_no: String,
+    pub student_name: Option<String>,
+    pub grade: Option<String>,
+    pub amount: i64,
+    pub matched: bool,
+    pub outstanding: i64,
+    pub will_apply: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapitationBatch {
+    pub id: String,
+    pub school_id: String,
+    pub term: i32,
+    pub academic_year: i32,
+    pub total_amount: i64,
+    pub student_count: i32,
+    pub matched_count: i32,
+    pub source_filename: Option<String>,
+    pub applied_by: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapitationApplyResult {
+    pub batch_id: String,
+    pub total_amount: i64,
+    pub student_count: i32,
+    pub matched_count: i32,
+    pub payments_recorded: i32,
+    pub unmatched: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GazetteCategory {
+    pub category: String,
+    pub charged: i64,
+    pub cap_amount: Option<i64>,
+    pub status: String, // "within" | "over" | "uncapped"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredDocument {
+    pub token: String,
+    pub kind: String,
+    pub ref_id: String,
+    pub filename: String,
+    pub expires_at: String,
+}
+
 // ═══ C2B ═══
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

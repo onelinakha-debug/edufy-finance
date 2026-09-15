@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { DiscountConfigPanel } from "@/components/settings/discount-config";
 import { UserManagementPanel } from "@/components/settings/user-management";
 import { ComplianceDashboard } from "@/components/compliance/compliance-dashboard";
+import { GazettePanel } from "@/components/compliance/gazette-panel";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useAppStore } from "@/stores/app-store";
 import { cn, exportJSON, importJSON, confirmAction } from "@/lib/utils";
@@ -230,6 +231,7 @@ export default function SettingsPage() {
             <div className="card-claude p-3">
               <h3 className="text-sm font-semibold mb-3">CBC Compliance Checker</h3>
               <ComplianceDashboard schoolId={currentSchoolId || ""} term="1" />
+              <GazettePanel schoolId={currentSchoolId || ""} />
             </div>
           )}
 

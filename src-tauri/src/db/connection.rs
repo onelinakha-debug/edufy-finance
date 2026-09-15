@@ -355,12 +355,52 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             created_at      TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_linkotp_student ON parent_link_otps(student_id);
-        CREATE INDEX IF NOT EXISTS idx_linkotp_expires ON parent_link_otps(expires_at);")?;
+        CREATE INDEX IF NOT EXISTS idx_linkotp_expires ON parent_link_otps(expires_at);
+
+        -- Capitation batches (government per-student grants, applied oldest-first)
+        CREATE TABLE IF NOT EXISTS capitation_batches (
+            id              TEXT PRIMARY KEY,
+            school_id       TEXT NOT NULL REFERENCES schools(id),
+            term            INTEGER NOT NULL,
+            academic_year   INTEGER NOT NULL,
+            total_amount    INTEGER NOT NULL DEFAULT 0,
+            student_count   INTEGER NOT NULL DEFAULT 0,
+            matched_count   INTEGER NOT NULL DEFAULT 0,
+            content_hash    TEXT NOT NULL DEFAULT '',
+            source_filename TEXT,
+            applied_by      TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_capbatch_school ON capitation_batches(school_id);
+        CREATE INDEX IF NOT EXISTS idx_capbatch_hash ON capitation_batches(school_id, content_hash);
+
+        -- Bursar-configured fee caps per category (gazette compliance; empty = uncapped)
+        CREATE TABLE IF NOT EXISTS fee_caps (
+            school_id       TEXT NOT NULL REFERENCES schools(id),
+            category        TEXT NOT NULL,
+            cap_amount      INTEGER NOT NULL,
+            updated_at      TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (school_id, category)
+        );
+
+        -- Document vault: PDFs served via expiring public links (WhatsApp docs)
+        CREATE TABLE IF NOT EXISTS documents (
+            token           TEXT PRIMARY KEY,
+            school_id       TEXT NOT NULL REFERENCES schools(id),
+            kind            TEXT NOT NULL,
+            ref_id          TEXT NOT NULL,
+            filename        TEXT NOT NULL,
+            pdf_blob        BLOB NOT NULL,
+            expires_at      TEXT NOT NULL,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_docs_expires ON documents(expires_at);")?;
 
     // Parents hardening columns (idempotent guards for existing DBs)
     ensure_column(conn, "parents", "phone_e164", "TEXT")?;
     ensure_column(conn, "parents", "sms_opt_out", "INTEGER DEFAULT 0")?;
     ensure_column(conn, "parents", "preferred_lang", "TEXT DEFAULT 'en'")?;
+    ensure_column(conn, "payments", "capitation_batch_id", "TEXT")?;
     backfill_phone_e164(conn);
 
     Ok(())
@@ -382,8 +422,7 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Res
 }
 
 /// Best-effort normalize of legacy parent phones to E.164 2547XXXXXXXX.
-fn backfill_phone_e164(conn: &Connection) {
-    let rows: Vec<(String, String)> = conn.prepare("SELECT id, phone FROM parents WHERE phone_e164 IS NULL OR phone_e164 = ''")
+fn backfill_phone_e164(conn: &Connection) {    let rows: Vec<(String, String)> = conn.prepare("SELECT id, phone FROM parents WHERE phone_e164 IS NULL OR phone_e164 = ''")
         .and_then(|mut s| s.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).and_then(|r| r.collect::<Result<Vec<_>, _>>()))
         .unwrap_or_default();
     for (id, phone) in rows {
@@ -400,5 +439,31 @@ fn backfill_phone_e164(conn: &Connection) {
         if let Some(e) = e164 {
             let _ = conn.execute("UPDATE parents SET phone_e164 = ?1 WHERE id = ?2", rusqlite::params![e, id]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrations_create_all_phase_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        for t in [
+            "schools", "students", "invoices", "payments",
+            "capitation_batches", "fee_caps", "documents",
+            "whatsapp_outbox", "whatsapp_sessions", "payment_links", "parent_link_otps",
+        ] {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![t],
+                |r| r.get(0),
+            ).unwrap();
+            assert_eq!(n, 1, "missing table {}", t);
+        }
+        // ensure_column is idempotent
+        ensure_column(&conn, "payments", "capitation_batch_id", "TEXT").unwrap();
+        ensure_column(&conn, "payments", "capitation_batch_id", "TEXT").unwrap();
     }
 }

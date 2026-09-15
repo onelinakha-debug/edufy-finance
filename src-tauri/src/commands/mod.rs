@@ -1,4 +1,6 @@
 pub mod dashboard;
+pub mod capitation;
+pub mod documents;
 pub mod fee;
 pub mod grade;
 pub mod invoice;
