@@ -37,7 +37,7 @@ export function MpesaStkPush({
   const [transactionId, setTransactionId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState("");
   const [mpesaReceipt, setMpesaReceipt] = useState<string | null>(null);
-  const pollRef = useRef<NodeJS.Timeout | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     return () => {
@@ -66,8 +66,8 @@ export function MpesaStkPush({
 
     try {
       const result = await mpesaApi.initiatePayment({
-        school_id: currentSchoolId,
-        invoice_id: invoiceId,
+        schoolId: currentSchoolId,
+        invoiceId: invoiceId,
         phone: formattedPhone,
         amount,
       });

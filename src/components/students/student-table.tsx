@@ -103,11 +103,8 @@ export function StudentTable({ onStudentClick }: StudentTableProps) {
       data={filteredStudents}
       loading={loading}
       onRowClick={onStudentClick}
-      sortBy={sortBy}
-      sortOrder={sortOrder}
-      onSort={(key, order) => setSort(key, order)}
       rowKey={(row) => row.id}
-      emptyMessage="No students found"
+      emptyTitle="No students found"
     />
   );
 }

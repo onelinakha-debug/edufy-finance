@@ -238,10 +238,6 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         -- Discount configs
         CREATE INDEX IF NOT EXISTS idx_discount_configs_school ON discount_configs(school_id);
 
-        -- M-Pesa
-        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_school ON mpesa_transactions(school_id);
-        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_checkout ON mpesa_transactions(checkout_request_id);
-        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_invoice ON mpesa_transactions(invoice_id);
         ")?;
 
     // Ensure discount_configs table exists (migration safety)
@@ -258,7 +254,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         );",
     )?;
 
-    // M-Pesa tables
+    // M-Pesa tables (must be created before indexes)
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS mpesa_configs (
             id                TEXT PRIMARY KEY,
@@ -289,7 +285,12 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             raw_callback            TEXT,
             created_at              TEXT DEFAULT (datetime('now')),
             updated_at              TEXT DEFAULT (datetime('now'))
-        );")?;
+        );
+
+        -- M-Pesa indexes (after table creation)
+        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_school ON mpesa_transactions(school_id);
+        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_checkout ON mpesa_transactions(checkout_request_id);
+        CREATE INDEX IF NOT EXISTS idx_mpesa_tx_invoice ON mpesa_transactions(invoice_id);")?;
 
     Ok(())
 }

@@ -6,8 +6,9 @@ import { formatKES, getMethodName } from "@/lib/utils";
 import { LoadingPage } from "@/components/shared/loading-spinner";
 import { EmptyState } from "@/components/shared/empty-state";
 import { SearchSelect } from "@/components/ui/search-select";
-import { Download, TrendingUp, BarChart3 } from "lucide-react";
+import { Download, TrendingUp, BarChart3, FileText } from "lucide-react";
 import { useExport } from "@/hooks/use-export";
+import { generateReportPdf } from "@/lib/pdf";
 
 export function CollectionReport() {
   const { currentSchoolId } = useAppStore();
@@ -53,13 +54,42 @@ export function CollectionReport() {
             className="w-28"
           />
         </div>
-        <button
-          onClick={handleExport}
-          className="px-3 py-1.5 text-sm font-medium rounded-md border border-input hover:bg-muted inline-flex items-center gap-2"
-        >
-          <Download className="h-4 w-4" />
-          Export CSV
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleExport}
+            className="px-3 py-1.5 text-sm font-medium rounded-md border border-input hover:bg-muted inline-flex items-center gap-2"
+          >
+            <Download className="h-4 w-4" />
+            Export CSV
+          </button>
+          <button
+            onClick={() => {
+              const headers = ["Vote Head", "Invoiced", "Paid", "Outstanding"];
+              const rows = summary.by_vote_head.map((v) => [
+                v.name,
+                v.invoiced.toLocaleString(),
+                v.paid.toLocaleString(),
+                (v.invoiced - v.paid).toLocaleString(),
+              ]);
+              generateReportPdf(
+                `Collection Summary — Term ${term}`,
+                headers,
+                rows,
+                `collection-report-term-${term}.pdf`,
+                [
+                  { label: "Total Invoiced", value: formatKES(summary.total_invoiced) },
+                  { label: "Total Paid", value: formatKES(summary.total_paid) },
+                  { label: "Outstanding", value: formatKES(summary.total_outstanding) },
+                  { label: "Collection Rate", value: `${summary.total_invoiced > 0 ? Math.round((summary.total_paid / summary.total_invoiced) * 100) : 0}%` },
+                ]
+              );
+            }}
+            className="px-3 py-1.5 text-sm font-medium rounded-md border border-input hover:bg-muted inline-flex items-center gap-2"
+          >
+            <FileText className="h-4 w-4" />
+            Export PDF
+          </button>
+        </div>
       </div>
 
       {/* Summary cards */}

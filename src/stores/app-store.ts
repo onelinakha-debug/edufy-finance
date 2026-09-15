@@ -3,9 +3,9 @@ import { create } from "zustand";
 interface AuthUser {
   id: string;
   username: string;
-  full_name: string;
+  fullName: string;
   role: string;
-  school_id: string;
+  schoolId: string;
 }
 
 interface AppState {
@@ -70,7 +70,7 @@ export const useAppStore = create<AppState>((set) => ({
   login: (user, token) => {
     localStorage.setItem("auth_token", token);
     localStorage.setItem("auth_user", JSON.stringify(user));
-    set({ isAuthenticated: true, authUser: user, authToken: token, currentSchoolId: user.school_id });
+    set({ isAuthenticated: true, authUser: user, authToken: token, currentSchoolId: user.schoolId });
   },
   logout: () => {
     localStorage.removeItem("auth_token");
@@ -93,7 +93,7 @@ export const useAppStore = create<AppState>((set) => ({
       return { theme: next };
     }),
 
-  currentSchoolId: initial.user?.school_id ?? null,
+  currentSchoolId: initial.user?.schoolId ?? null,
   setCurrentSchoolId: (id) => set({ currentSchoolId: id }),
 
   activeModal: null,

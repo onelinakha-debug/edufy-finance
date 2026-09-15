@@ -225,7 +225,7 @@ export function StudentImportWizard({ open, onClose }: ImportWizardProps) {
       if (mapped.grade && !GRADES_CBC.includes(mapped.grade)) errors.push(`Unknown grade: ${mapped.grade}`);
       if (mapped.status && !["active", "inactive", "graduated"].includes(mapped.status)) errors.push(`Invalid status: ${mapped.status}`);
       if (mapped.admission_no && existingAdmNos.has(mapped.admission_no)) errors.push("Duplicate admission no");
-      return { ...mapped, errors, rowIndex: row.index };
+      return { ...mapped, errors, rowIndex: row.index, raw: row.raw };
     });
   }, [rawRows, fields, nameSplit, existingAdmNos]);
 
@@ -266,8 +266,6 @@ export function StudentImportWizard({ open, onClose }: ImportWizardProps) {
           middle_name: mapped.middle_name?.trim() || undefined,
           grade: mapped.grade,
           stream: mapped.stream?.trim() || undefined,
-          status: (mapped.status as "active" | "inactive" | "graduated") || "active",
-          enrollment_date: mapped.date_of_birth || undefined,
         });
         existingAdmNos.add(mapped.admission_no);
         res.success++;
@@ -550,7 +548,7 @@ export function StudentImportWizard({ open, onClose }: ImportWizardProps) {
                       <tr key={i} className={cn("border-b border-border/50", row.errors.length > 0 && "bg-destructive/5")}>
                         <td className="px-2 py-1.5 text-muted-foreground">{row.rowIndex + 2}</td>
                         {mappedFields.map((f) => {
-                          const val = f.key === "__full_name__" ? row.raw[nameSplit.csvColumn || ""] : row[f.key];
+                          const val = f.key === "__full_name__" ? row.raw[nameSplit.csvColumn || ""] : (row as unknown as Record<string, string>)[f.key];
                           return (
                             <td key={f.key} className="px-2 py-1.5 truncate max-w-[120px]">
                               {val || <span className="text-muted-foreground">—</span>}

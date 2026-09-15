@@ -37,6 +37,14 @@ interface StudentFullDetail {
   }>;
   outstanding_fees: number;
   total_paid: number;
+  invoices?: Array<{
+    id: string;
+    invoice_no: string;
+    total_amount: number;
+    net_amount: number;
+    status: string;
+    created_at: string;
+  }>;
 }
 
 export function StudentDetail({ student, onBack }: StudentDetailProps) {

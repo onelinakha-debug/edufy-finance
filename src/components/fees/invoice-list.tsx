@@ -87,6 +87,7 @@ export function InvoiceList({ onInvoiceClick }: InvoiceListProps) {
         icon={FileText}
         title="No invoices generated"
         description="Generate invoices from fee structures to start tracking payments."
+        action={{ label: "Generate Invoices", onClick: () => window.dispatchEvent(new CustomEvent("generate-invoices")), icon: FileText }}
       />
     );
   }
@@ -98,7 +99,7 @@ export function InvoiceList({ onInvoiceClick }: InvoiceListProps) {
       loading={invoicesLoading}
       onRowClick={onInvoiceClick}
       rowKey={(row) => row.id}
-      emptyMessage="No invoices found"
+      emptyTitle="No invoices found"
     />
   );
 }

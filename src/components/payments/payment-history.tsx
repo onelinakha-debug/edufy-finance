@@ -110,7 +110,7 @@ export function PaymentHistory({ onPaymentClick }: PaymentHistoryProps) {
       loading={loading}
       onRowClick={onPaymentClick}
       rowKey={(row) => row.id}
-      emptyMessage="No payments found"
+      emptyTitle="No payments found"
     />
   );
 }

@@ -25,10 +25,10 @@ export default function LoginPage() {
       const result = await authApi.login({
         username: username.trim(),
         password: password.trim(),
-        school_id: schoolId.trim(),
+        schoolId: schoolId.trim(),
       });
       login(
-        { id: result.user.id, username: result.user.username, full_name: result.user.full_name, role: result.user.role, school_id: result.school_id },
+        { id: result.user.id, username: result.user.username, fullName: result.user.fullName, role: result.user.role, schoolId: result.schoolId },
         result.token
       );
       navigate("/dashboard", { replace: true });

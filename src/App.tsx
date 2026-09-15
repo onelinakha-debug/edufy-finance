@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useAppStore } from "@/stores/app-store";
+import { schoolApi } from "@/services/tauri-commands";
 import { AppShell } from "@/components/layout/app-shell";
 import LoginPage from "@/pages/login";
 import DashboardPage from "@/pages/dashboard";
@@ -13,19 +14,97 @@ import NotFoundPage from "@/pages/not-found";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAppStore((s) => s.isAuthenticated);
+  const [checking, setChecking] = useState(true);
+  const [hasSchools, setHasSchools] = useState(false);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      setChecking(false);
+      return;
+    }
+    (async () => {
+      try {
+        const schools = await schoolApi.list();
+        setHasSchools(schools && schools.length > 0);
+      } catch {
+        setHasSchools(false);
+      } finally {
+        setChecking(false);
+      }
+    })();
+  }, [isAuthenticated]);
+
+  if (checking) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  // First run (no schools) → allow through, AppShell will show onboarding
+  if (!hasSchools) {
+    return <>{children}</>;
+  }
+
+  // Schools exist but not authenticated → login
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
   }
+
+  return <>{children}</>;
+}
+
+function FirstRunRedirect({ children }: { children: React.ReactNode }) {
+  const isAuthenticated = useAppStore((s) => s.isAuthenticated);
+  const [checking, setChecking] = useState(true);
+  const [hasSchools, setHasSchools] = useState(false);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      setChecking(false);
+      return;
+    }
+    (async () => {
+      try {
+        const schools = await schoolApi.list();
+        setHasSchools(schools && schools.length > 0);
+      } catch {
+        setHasSchools(false);
+      } finally {
+        setChecking(false);
+      }
+    })();
+  }, [isAuthenticated]);
+
+  if (checking) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  // First run → go to dashboard (which shows onboarding)
+  if (!hasSchools) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
   return <>{children}</>;
 }
 
 export default function App() {
-  const isAuthenticated = useAppStore((s) => s.isAuthenticated);
-
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <LoginPage />} />
+        <Route
+          path="/login"
+          element={
+            <FirstRunRedirect>
+              <LoginPage />
+            </FirstRunRedirect>
+          }
+        />
         <Route
           element={
             <RequireAuth>

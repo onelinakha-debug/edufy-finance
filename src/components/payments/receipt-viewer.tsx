@@ -3,7 +3,9 @@ import { cn, formatKES, formatDateTime, getMethodName } from "@/lib/utils";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { LoadingPage } from "@/components/shared/loading-spinner";
 import { usePaymentStore, PaymentDetail } from "@/stores/payment-store";
+import { useSettingsStore } from "@/stores/settings-store";
 import { useAppStore } from "@/stores/app-store";
+import { generateReceipt } from "@/lib/pdf";
 import {
   ArrowLeft,
   Printer,
@@ -34,6 +36,7 @@ export function PaymentReceipt({ paymentId, onBack }: PaymentReceiptProps) {
   const [detail, setDetail] = useState<PaymentDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const { fetchPaymentDetail } = usePaymentStore();
+  const { profile } = useSettingsStore();
   const { addToast } = useAppStore();
 
   useEffect(() => {
@@ -171,7 +174,29 @@ export function PaymentReceipt({ paymentId, onBack }: PaymentReceiptProps) {
               <Printer className="h-4 w-4" />
               Print Receipt
             </button>
-            <button className="px-4 py-2 text-sm font-medium rounded-md border border-input hover:bg-muted transition-colors inline-flex items-center gap-2">
+            <button
+              onClick={() => {
+                generateReceipt({
+                  schoolName: profile?.name || "School",
+                  schoolAddress: profile?.address || undefined,
+                  schoolPhone: profile?.phone || undefined,
+                  receiptNo: payment.payment_no,
+                  paymentNo: payment.payment_no,
+                  studentName: student_name,
+                  admissionNo: admission_no,
+                  grade: "",
+                  amount: payment.amount,
+                  method: payment.method,
+                  mpesaReceipt: payment.mpesa_receipt || undefined,
+                  reference: payment.reference || undefined,
+                  notes: payment.notes || undefined,
+                  date: payment.created_at,
+                  receivedBy: payment.received_by || undefined,
+                });
+                addToast({ title: "Receipt downloaded", variant: "success" });
+              }}
+              className="px-4 py-2 text-sm font-medium rounded-md border border-input hover:bg-muted transition-colors inline-flex items-center gap-2"
+            >
               <Download className="h-4 w-4" />
               Download PDF
             </button>

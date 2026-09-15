@@ -134,7 +134,7 @@ export function OutstandingReport({ onStudentClick }: OutstandingReportProps) {
           loading={loading}
           onRowClick={(row) => onStudentClick?.(row.student_id)}
           rowKey={(row) => row.student_id}
-          emptyMessage="No outstanding balances"
+          emptyTitle="No outstanding balances"
         />
       )}
     </div>

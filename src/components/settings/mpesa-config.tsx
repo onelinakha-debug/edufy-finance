@@ -64,7 +64,7 @@ export function MpesaConfigPanel({ schoolId }: MpesaConfigPanelProps) {
     }
     setSaving(true);
     try {
-      const result = await mpesaApi.saveConfig({ school_id: schoolId, ...config });
+      const result = await mpesaApi.saveConfig({ schoolId, consumerKey: config.consumer_key, consumerSecret: config.consumer_secret, passkey: config.passkey, shortcode: config.shortcode, callbackUrl: config.callback_url });
       setExistingConfig(result);
       addToast({ title: "M-Pesa credentials saved", variant: "success" });
     } catch (err) {

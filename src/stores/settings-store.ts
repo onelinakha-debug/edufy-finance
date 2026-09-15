@@ -66,7 +66,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   },
 
   createUser: async (schoolId, data) => {
-    const user = await settingsApi.createUser(schoolId, data);
+    const user = await settingsApi.createUser(schoolId, { ...data, fullName: data.full_name });
     if (user) set((s) => ({ users: [...s.users, user] }));
     return user;
   },

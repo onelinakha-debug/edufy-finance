@@ -15,10 +15,6 @@ pub fn create_school_inner(
 ) -> Result<School, String> {
     if name.trim().is_empty() { return Err("School name is required".to_string()); }
     if name.len() > 200 { return Err("School name too long (max 200 characters)".to_string()); }
-    let valid_types = ["primary", "secondary", "combined"];
-    if !valid_types.contains(&school_type.as_str()) {
-        return Err(format!("Invalid school type '{}'. Must be one of: primary, secondary, combined", school_type));
-    }
     if let Some(ref e) = email {
         if !e.is_empty() && !e.contains('@') { return Err("Invalid email format".to_string()); }
     }

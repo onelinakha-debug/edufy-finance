@@ -233,7 +233,7 @@ export function PaymentHub({ onPaymentRecorded }: PaymentHubProps) {
               invoiceId={selectedInvoice.id}
               invoiceNo={selectedInvoice.invoice_no}
               amount={watchAmount || selectedInvoice.net_amount}
-              studentName={`${selectedInvoice.student_first_name || ""} ${selectedInvoice.student_last_name || ""}`.trim() || "Student"}
+              studentName={`${(selectedInvoice as any).student_first_name || (selectedInvoice as any).studentName || ""} ${(selectedInvoice as any).student_last_name || ""}`.trim() || "Student"}
               onSuccess={() => {
                 fetchInvoices();
                 onPaymentRecorded?.();

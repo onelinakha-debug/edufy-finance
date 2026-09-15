@@ -1,5 +1,5 @@
 function isTauriAvailable(): boolean {
-  return typeof window !== "undefined" && "__TAURI__" in window;
+  return typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
 }
 
 function getAuthToken(): string | null {
@@ -10,15 +10,29 @@ function getAuthToken(): string | null {
   }
 }
 
+function toSnakeCase(obj: unknown): unknown {
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) return obj.map(toSnakeCase);
+  if (typeof obj !== "object") return obj;
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+    const snakeKey = key.replace(/[A-Z]/g, (m) => "_" + m.toLowerCase());
+    result[snakeKey] = toSnakeCase(value);
+  }
+  return result;
+}
+
 async function httpCmd<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const token = getAuthToken();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
+  const body = args ? toSnakeCase(args) : {};
+
   const res = await fetch(`/api/${command}`, {
     method: "POST",
     headers,
-    body: JSON.stringify(args ?? {}),
+    body: JSON.stringify(body),
   });
 
   if (res.status === 401) {
@@ -29,8 +43,8 @@ async function httpCmd<T>(command: string, args?: Record<string, unknown>): Prom
   }
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || `Request failed: ${res.status}`);
+    const errBody = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(errBody.error || `Request failed: ${res.status}`);
   }
 
   return res.json() as Promise<T>;
@@ -51,13 +65,13 @@ async function cmd<T>(command: string, args?: Record<string, unknown>): Promise<
 
 // ═══ AUTH ═══
 export const authApi = {
-  login: (data: { username: string; password: string; school_id: string }) =>
-    cmd<{ user: { id: string; username: string; full_name: string; role: string }; token: string; school_id: string }>("login", data),
+  login: (data: { username: string; password: string; schoolId: string }) =>
+    cmd<{ user: { id: string; username: string; fullName: string; role: string }; token: string; schoolId: string }>("login", data),
 };
 
 // ═══ SCHOOL ═══
 export const schoolApi = {
-  create: (data: { name: string; school_type: string; curriculum?: string; county?: string; phone?: string; email?: string }) =>
+  create: (data: { name: string; schoolType: string; curriculum?: string; county?: string; phone?: string; email?: string }) =>
     cmd<any>("create_school", data),
   list: () =>
     cmd<any[]>("list_schools"),
@@ -70,8 +84,8 @@ export const schoolApi = {
 // ═══ STUDENTS ═══
 export const studentApi = {
   create: (data: {
-    school_id: string; admission_no: string; first_name: string; last_name: string;
-    middle_name?: string; grade: string; stream?: string; enrollment_date?: string;
+    schoolId: string; admissionNo: string; firstName: string; lastName: string;
+    middleName?: string; grade: string; stream?: string; enrollmentDate?: string;
   }) => cmd<any>("create_student", data),
   list: (schoolId: string, filters?: { grade?: string; status?: string }) =>
     cmd<any[]>("get_students", { schoolId, ...filters }),
@@ -85,20 +99,20 @@ export const studentApi = {
 
 // ═══ FEE STRUCTURES ═══
 export const feeApi = {
-  createStructure: (data: { school_id: string; name: string; grade: string; term: number; academic_year: number }) =>
+  createStructure: (data: { schoolId: string; name: string; grade: string; term: number; academicYear: number }) =>
     cmd<any>("create_fee_structure", data),
-  listStructures: (schoolId: string, filters?: { academic_year?: number; term?: number }) =>
+  listStructures: (schoolId: string, filters?: { academicYear?: number; term?: number }) =>
     cmd<any[]>("get_fee_structures", { schoolId, ...filters }),
-  addVoteHead: (data: { fee_structure_id: string; name: string; category: string; amount: number; is_mandatory?: boolean }) =>
+  addVoteHead: (data: { feeStructureId: string; name: string; category: string; amount: number; isMandatory?: boolean }) =>
     cmd<any>("add_vote_head", data),
   getVoteHeads: (feeStructureId: string) =>
     cmd<any[]>("get_vote_heads", { feeStructureId }),
 
   listDiscountConfigs: (schoolId: string) =>
     cmd<any[]>("get_discount_configs", { schoolId }),
-  addDiscountConfig: (data: { school_id: string; name: string; type: string; rate: number; min_students: number; is_active: boolean }) => {
+  addDiscountConfig: (data: { schoolId: string; name: string; type: string; rate: number; minStudents: number; isActive: boolean }) => {
     const { type, ...rest } = data;
-    return cmd<any>("add_discount_config", { ...rest, discount_type: type });
+    return cmd<any>("add_discount_config", { ...rest, discountType: type });
   },
   removeDiscountConfig: (id: string) =>
     cmd<void>("remove_discount_config", { id }),
@@ -108,7 +122,7 @@ export const feeApi = {
 export const invoiceApi = {
   generate: (feeStructureId: string, studentIds?: string[]) =>
     cmd<any[]>("generate_invoices", { feeStructureId, studentIds }),
-  list: (filters?: { student_id?: string; status?: string; limit?: number; offset?: number }) =>
+  list: (filters?: { studentId?: string; status?: string; limit?: number; offset?: number }) =>
     cmd<any[]>("get_invoices", { ...filters }),
   detail: (id: string) =>
     cmd<any>("get_invoice_detail", { id }),
@@ -117,10 +131,10 @@ export const invoiceApi = {
 // ═══ PAYMENTS ═══
 export const paymentApi = {
   record: (data: {
-    invoice_id: string; amount: number; method: string; reference?: string;
-    mpesa_receipt?: string; notes?: string; received_by?: string;
+    invoiceId: string; amount: number; method: string; reference?: string;
+    mpesaReceipt?: string; notes?: string; receivedBy?: string;
   }) => cmd<any>("record_payment", data),
-  list: (filters?: { student_id?: string; method?: string; limit?: number; offset?: number }) =>
+  list: (filters?: { studentId?: string; method?: string; limit?: number; offset?: number }) =>
     cmd<any[]>("get_payments", { ...filters }),
   detail: (id: string) =>
     cmd<any>("get_payment_detail", { id }),
@@ -131,13 +145,13 @@ export const mpesaApi = {
   getConfig: (schoolId: string) =>
     cmd<any | null>("get_mpesa_config", { schoolId }),
   saveConfig: (data: {
-    school_id: string; consumer_key: string; consumer_secret: string;
-    passkey: string; shortcode: string; callback_url?: string;
+    schoolId: string; consumerKey: string; consumerSecret: string;
+    passkey: string; shortcode: string; callbackUrl?: string;
   }) => cmd<any>("save_mpesa_config", data),
   testConnection: (schoolId: string) =>
     cmd<string>("test_mpesa_connection", { schoolId }),
   initiatePayment: (data: {
-    school_id: string; invoice_id: string; phone: string; amount: number;
+    schoolId: string; invoiceId: string; phone: string; amount: number;
   }) => cmd<any>("initiate_mpesa_payment", data),
   checkStatus: (transactionId: string) =>
     cmd<any>("check_mpesa_status", { transactionId }),
@@ -160,9 +174,9 @@ export const dashboardApi = {
 };
 
 export const reportApi = {
-  collectionSummary: (schoolId: string, academicYear: number, term?: string) =>
+  collectionSummary: (schoolId: string, academicYear: number, term?: number) =>
     cmd<any>("get_collection_summary", { schoolId, academicYear, term }),
-  outstandingReport: (schoolId: string, academicYear: number, term?: string) =>
+  outstandingReport: (schoolId: string, academicYear: number, term?: number) =>
     cmd<any[]>("get_outstanding_report", { schoolId, academicYear, term }),
   studentHistory: (studentId: string) =>
     cmd<any[]>("get_student_history", { studentId }),
@@ -183,12 +197,12 @@ export const settingsApi = {
     cmd<any>("get_school_profile", { schoolId }),
   updateSchoolProfile: (schoolId: string, data: Record<string, unknown>) => {
     const { type, ...rest } = data;
-    return cmd<any>("update_school_profile", { schoolId, school_type: type, ...rest });
+    return cmd<any>("update_school_profile", { schoolId, schoolType: type, ...rest });
   },
 
   listUsers: (schoolId: string) =>
     cmd<any[]>("list_users", { schoolId }),
-  createUser: (schoolId: string, data: { username: string; password: string; full_name: string; role: string }) =>
+  createUser: (schoolId: string, data: { username: string; password: string; fullName: string; role: string }) =>
     cmd<any>("create_user", { schoolId, ...data }),
   updateUser: (userId: string, data: Record<string, unknown>) =>
     cmd<any>("update_user", { userId, ...data }),
@@ -202,7 +216,7 @@ export const gradeApi = {
     cmd<any>("create_grade", { schoolId, name, level, sortOrder }),
   list: (schoolId: string) =>
     cmd<any[]>("get_grades", { schoolId }),
-  update: (id: string, data: { name?: string; level?: string; sort_order?: number; is_active?: boolean }) =>
+  update: (id: string, data: { name?: string; level?: string; sortOrder?: number; isActive?: boolean }) =>
     cmd<any>("update_grade", { id, ...data }),
   delete: (id: string) =>
     cmd<void>("delete_grade", { id }),

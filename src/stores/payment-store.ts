@@ -70,7 +70,15 @@ export const usePaymentStore = create<PaymentState>((set) => ({
   },
 
   recordPayment: async (data) => {
-    const payment = await paymentApi.record(data);
+    const payment = await paymentApi.record({
+      invoiceId: data.invoice_id,
+      amount: data.amount,
+      method: data.method,
+      reference: data.reference,
+      mpesaReceipt: data.mpesa_receipt,
+      notes: data.notes,
+      receivedBy: data.received_by,
+    });
     if (payment) set((s) => ({ payments: [payment, ...s.payments] }));
     return payment;
   },

@@ -3,6 +3,7 @@ import { cn, formatKES } from "@/lib/utils";
 import { useFeeStore, FeeStructure } from "@/stores/fee-store";
 import { useAppStore } from "@/stores/app-store";
 import { GRADES_CBC, TERMS } from "@/lib/constants";
+import { SearchSelect } from "@/components/ui/search-select";
 import { Loader2, CheckCircle, AlertTriangle, Layers } from "lucide-react";
 
 interface InvoiceGeneratorProps {
@@ -63,7 +64,7 @@ export function InvoiceGenerator({ schoolId, onGenerated }: InvoiceGeneratorProp
               label: `${s.name} — ${s.grade} (Term ${s.term}, ${s.academic_year})`
             }))}
             value={selectedStructureId}
-            onChange={(v) => { setSelectedStructureId(v); setResult(null); }}
+            onChange={(v: string) => { setSelectedStructureId(v); setResult(null); }}
             placeholder="Select a fee structure"
             searchable={true}
           />

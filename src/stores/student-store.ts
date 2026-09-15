@@ -66,7 +66,7 @@ export const useStudentStore = create<StudentState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const { gradeFilter, statusFilter } = get();
-      const students = await studentApi.list(schoolId, {
+      const students = await studentApi.list(schoolId || "", {
         grade: gradeFilter || undefined,
         status: statusFilter || undefined,
       });
@@ -77,7 +77,15 @@ export const useStudentStore = create<StudentState>((set, get) => ({
   },
 
   addStudent: async (data) => {
-    const student = await studentApi.create(data);
+    const student = await studentApi.create({
+      schoolId: data.school_id,
+      admissionNo: data.admission_no,
+      firstName: data.first_name,
+      lastName: data.last_name,
+      middleName: data.middle_name,
+      grade: data.grade,
+      stream: data.stream,
+    });
     if (student) set((s) => ({ students: [...s.students, student] }));
     return student;
   },

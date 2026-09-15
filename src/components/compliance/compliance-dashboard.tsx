@@ -27,8 +27,8 @@ export function ComplianceDashboard({ schoolId, term }: ComplianceDashboardProps
   useEffect(() => {
     if (schoolId) {
       setLoading(true);
-      fetchStructures(schoolId, 2026).then(async (structs) => {
-        for (const s of structs || []) {
+      fetchStructures(schoolId, 2026).then(async () => {
+        for (const s of structures) {
           await fetchVoteHeads(s.id);
         }
         setLoading(false);

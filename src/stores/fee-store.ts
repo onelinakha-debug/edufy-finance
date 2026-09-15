@@ -117,6 +117,7 @@ export interface DiscountConfig {
 // Merge discount state into FeeState
 interface FeeStateWithDiscounts extends FeeState {
   discountConfigs: DiscountConfig[];
+  loading: boolean;
   fetchDiscountConfigs: (schoolId: string) => Promise<void>;
   addDiscountConfig: (data: Omit<DiscountConfig, "id">) => Promise<DiscountConfig>;
   removeDiscountConfig: (id: string) => Promise<void>;
@@ -136,7 +137,7 @@ export const useFeeStore = create<FeeStateWithDiscounts>((set, get) => ({
     set({ structuresLoading: true });
     try {
       const structures = await feeApi.listStructures(schoolId, {
-        academic_year: year,
+        academicYear: year,
         term: term,
       });
       set({ structures: structures || [], structuresLoading: false });
@@ -146,7 +147,7 @@ export const useFeeStore = create<FeeStateWithDiscounts>((set, get) => ({
   },
 
   createStructure: async (data) => {
-    const structure = await feeApi.createStructure(data);
+    const structure = await feeApi.createStructure({ schoolId: data.school_id, name: data.name, grade: data.grade, term: data.term, academicYear: data.academic_year });
     if (structure) set((s) => ({ structures: [structure, ...s.structures] }));
     return structure;
   },
@@ -167,7 +168,13 @@ export const useFeeStore = create<FeeStateWithDiscounts>((set, get) => ({
   },
 
   addVoteHead: async (data) => {
-    const head = await feeApi.addVoteHead(data);
+    const head = await feeApi.addVoteHead({
+      feeStructureId: data.fee_structure_id,
+      name: data.name,
+      category: data.category,
+      amount: data.amount,
+      isMandatory: data.is_mandatory,
+    });
     if (head) set((s) => ({
       voteHeads: {
         ...s.voteHeads,
@@ -204,6 +211,7 @@ export const useFeeStore = create<FeeStateWithDiscounts>((set, get) => ({
 
   // Discount configs
   discountConfigs: [],
+  loading: false,
   fetchDiscountConfigs: async (schoolId) => {
     try {
       const configs = await feeApi.listDiscountConfigs(schoolId);
@@ -211,7 +219,14 @@ export const useFeeStore = create<FeeStateWithDiscounts>((set, get) => ({
     } catch { /* noop */ }
   },
   addDiscountConfig: async (data) => {
-    const config = await feeApi.addDiscountConfig(data);
+    const config = await feeApi.addDiscountConfig({
+      schoolId: data.school_id,
+      name: data.name,
+      type: data.type,
+      rate: data.rate,
+      minStudents: data.min_students,
+      isActive: data.is_active,
+    });
     if (config) set((s) => ({ discountConfigs: [...s.discountConfigs, config] }));
     return config;
   },
