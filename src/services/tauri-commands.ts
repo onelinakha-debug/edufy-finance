@@ -226,6 +226,22 @@ export const payApi = {
     if (!res.ok) throw new Error(res.status === 404 ? "Payment link not found" : `Request failed: ${res.status}`);
     return res.json();
   },
+  confirm: async (token: string, phone: string) => {
+    const res = await fetch(`/pay/${encodeURIComponent(token)}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `Request failed: ${res.status}`);
+    return body as { transaction_id: string; checkout_request_id: string | null; status: string; amount: number };
+  },
+  status: async (transactionId: string) => {
+    const res = await fetch(`/pay/status/${encodeURIComponent(transactionId)}`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `Request failed: ${res.status}`);
+    return body as { status: string; result_description: string | null; mpesa_receipt: string | null; amount: number };
+  },
 };
 
 // ═══ GRADES ═══

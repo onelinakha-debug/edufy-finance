@@ -148,13 +148,23 @@ pub async fn initiate_mpesa_payment(
     phone: String,
     amount: i64,
 ) -> Result<MpesaTransaction, String> {
+    initiate_mpesa_payment_inner(&state.0, &school_id, &invoice_id, &phone, amount).await
+}
+
+pub async fn initiate_mpesa_payment_inner(
+    db: &Mutex<Connection>,
+    school_id: &str,
+    invoice_id: &str,
+    phone: &str,
+    amount: i64,
+) -> Result<MpesaTransaction, String> {
     if amount <= 0 {
         return Err("Amount must be greater than 0".to_string());
     }
 
     // Get config
     let (consumer_key, consumer_secret, passkey, shortcode, callback_url) = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT consumer_key, consumer_secret, passkey, shortcode, callback_url
              FROM mpesa_configs WHERE school_id = ?1 AND is_active = 1",
@@ -174,7 +184,7 @@ pub async fn initiate_mpesa_payment(
 
     // Get account reference from invoice
     let account_ref = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT invoice_no FROM invoices WHERE id = ?1",
             rusqlite::params![invoice_id],
@@ -211,7 +221,7 @@ pub async fn initiate_mpesa_payment(
     };
 
     {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = db.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO mpesa_transactions (id, school_id, invoice_id, merchant_request_id, checkout_request_id, phone, amount, account_reference, status, result_description, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
@@ -227,11 +237,11 @@ pub async fn initiate_mpesa_payment(
 
     Ok(MpesaTransaction {
         id: tx_id,
-        school_id,
-        invoice_id: Some(invoice_id),
+        school_id: school_id.to_string(),
+        invoice_id: Some(invoice_id.to_string()),
         merchant_request_id: stk_response.merchant_request_id,
         checkout_request_id: stk_response.checkout_request_id,
-        phone,
+        phone: phone.to_string(),
         amount,
         account_reference: Some(account_ref),
         status: status.to_string(),
@@ -249,9 +259,16 @@ pub async fn check_mpesa_status(
     state: State<'_, DbState>,
     transaction_id: String,
 ) -> Result<MpesaTransaction, String> {
+    check_mpesa_status_inner(&state.0, &transaction_id).await
+}
+
+pub async fn check_mpesa_status_inner(
+    db: &Mutex<Connection>,
+    transaction_id: &str,
+) -> Result<MpesaTransaction, String> {
     // Single lock acquisition — read all needed data at once
     let (_school_id, checkout_request_id, invoice_id, amount, consumer_key, consumer_secret, passkey, shortcode) = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = db.lock().map_err(|e| e.to_string())?;
         let (school_id, checkout_request_id, invoice_id, amount): (String, Option<String>, Option<String>, i64) = conn.query_row(
             "SELECT school_id, checkout_request_id, invoice_id, amount FROM mpesa_transactions WHERE id = ?1",
             rusqlite::params![transaction_id],
@@ -290,7 +307,7 @@ pub async fn check_mpesa_status(
     // Update transaction + auto-record payment in a single lock with transaction
     let now = chrono::Utc::now().to_rfc3339();
     {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = db.lock().map_err(|e| e.to_string())?;
         let result_code_int: Option<i32> = result_code.parse().ok();
 
         conn.execute("BEGIN", []).map_err(|e| e.to_string())?;
@@ -360,7 +377,7 @@ pub async fn check_mpesa_status(
     }
 
     // Return updated transaction
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.lock().map_err(|e| e.to_string())?;
     conn.query_row(
         "SELECT id, school_id, invoice_id, merchant_request_id, checkout_request_id, phone, amount, account_reference, status, result_code, result_description, mpesa_receipt, raw_callback, created_at, updated_at
          FROM mpesa_transactions WHERE id = ?1",

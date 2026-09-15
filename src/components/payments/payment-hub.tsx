@@ -7,6 +7,7 @@ import { PAYMENT_METHODS } from "@/lib/constants";
 import { usePaymentStore } from "@/stores/payment-store";
 import { useFeeStore } from "@/stores/fee-store";
 import { useAppStore } from "@/stores/app-store";
+import { whatsappApi } from "@/services/tauri-commands";
 import { SearchSelect } from "@/components/ui/search-select";
 import { MpesaStkPush } from "@/components/payments/mpesa-stk";
 import {
@@ -20,6 +21,8 @@ import {
   CreditCard,
   FileCheck,
   AlertTriangle,
+  Link2,
+  Copy,
 } from "lucide-react";
 
 const paymentSchema = z.object({
@@ -43,6 +46,88 @@ const METHOD_ICONS: Record<string, React.ElementType> = {
   cash: Banknote,
   cheque: FileCheck,
 };
+
+/** Bursar generates a single-use parent pay link (valid 10 min) to share via SMS/WhatsApp. */
+function ParentPayLink({ invoiceId }: { invoiceId: string }) {
+  const { addToast, currentSchoolId } = useAppStore();
+  const [phone, setPhone] = useState("");
+  const [link, setLink] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleGenerate = async () => {
+    if (!currentSchoolId) {
+      addToast({ title: "No school selected", variant: "error" });
+      return;
+    }
+    setGenerating(true);
+    try {
+      const res = await whatsappApi.generateLink(currentSchoolId, invoiceId, phone.trim());
+      const url = `${window.location.origin}/pay/${res.token}`;
+      setLink(url);
+      addToast({ title: "Pay link created (valid 10 min)", variant: "success" });
+    } catch (err) {
+      addToast({ title: "Could not create link", description: String(err), variant: "error" });
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      addToast({ title: "Copy failed — long-press to copy manually", variant: "warning" });
+    }
+  };
+
+  return (
+    <div className="mt-3 pt-3 border-t border-primary/20">
+      <p className="text-xs font-medium mb-2 flex items-center gap-1.5">
+        <Link2 className="h-3.5 w-3.5 text-primary" />
+        Parent self-service link
+      </p>
+      <p className="text-[11px] text-muted-foreground mb-2">
+        Share with the parent — they pay on their own phone, no bursar STK needed.
+      </p>
+      {!link ? (
+        <div className="flex gap-2">
+          <input
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            placeholder="Parent phone (optional)"
+            className="flex-1 h-8 rounded-md border border-input bg-transparent px-2.5 text-xs font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          />
+          <button
+            onClick={handleGenerate}
+            disabled={generating}
+            className="px-3 h-8 text-xs font-medium rounded-md border border-border hover:bg-muted/50 transition-colors inline-flex items-center gap-1.5 disabled:opacity-60"
+          >
+            {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Link2 className="h-3.5 w-3.5" />}
+            Generate
+          </button>
+        </div>
+      ) : (
+        <div className="flex gap-2">
+          <input
+            value={link}
+            readOnly
+            className="flex-1 h-8 rounded-md border border-input bg-muted/30 px-2.5 text-[11px] font-mono truncate"
+          />
+          <button
+            onClick={handleCopy}
+            className="px-3 h-8 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors inline-flex items-center gap-1.5"
+          >
+            <Copy className="h-3.5 w-3.5" />
+            {copied ? "Copied!" : "Copy"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function PaymentHub({ onPaymentRecorded }: PaymentHubProps) {
   const [selectedMethod, setSelectedMethod] = useState<string>("mpesa");
@@ -244,6 +329,7 @@ export function PaymentHub({ onPaymentRecorded }: PaymentHubProps) {
               }}
               onCancel={() => setShowStkPush(false)}
             />
+            <ParentPayLink invoiceId={selectedInvoice.id} />
           </div>
         )}
 

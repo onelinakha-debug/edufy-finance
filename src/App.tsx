@@ -4,6 +4,7 @@ import { useAppStore } from "@/stores/app-store";
 import { schoolApi } from "@/services/tauri-commands";
 import { AppShell } from "@/components/layout/app-shell";
 import LoginPage from "@/pages/login";
+import PayPage from "@/pages/pay";
 import DashboardPage from "@/pages/dashboard";
 import StudentsPage from "@/pages/students";
 import FeesPage from "@/pages/fees";
@@ -97,6 +98,8 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* Public: parent self-service payment (no login) */}
+        <Route path="/pay/:token" element={<PayPage />} />
         <Route
           path="/login"
           element={

@@ -222,7 +222,7 @@ async fn handle_wa_inbound(state: Arc<AppState>, payload: wa::WhatsAppIncoming) 
     let reply: String = if text == "balance" || text == "bal" || text == "fee" || text == "ada" {
         build_balance_reply(&balances)
     } else if text == "pay" || text == "lipa" {
-        build_pay_reply(&state, &balances).await
+        build_pay_reply(&state, &phone, &balances).await
     } else if text.chars().all(|c| c.is_ascii_digit()) && (3..=10).contains(&text.len()) {
         // Admission-no lookup: match against linked children
         let hit: Vec<_> = balances.iter().filter(|b| b.admission_no == text_raw.trim()).collect();
@@ -233,7 +233,7 @@ async fn handle_wa_inbound(state: Arc<AppState>, payload: wa::WhatsAppIncoming) 
         }
     } else if text.starts_with("btn:") {
         match text.as_str() {
-            "btn:pay_mpesa" => build_pay_reply(&state, &balances).await,
+            "btn:pay_mpesa" => build_pay_reply(&state, &phone, &balances).await,
             "btn:talk_bursar" => bursar_contact(&state),
             _ => build_balance_reply(&balances),
         }
@@ -291,7 +291,7 @@ fn build_balance_reply(balances: &[crate::models::ParentBalance]) -> String {
     out
 }
 
-async fn build_pay_reply(state: &Arc<AppState>, balances: &[crate::models::ParentBalance]) -> String {
+async fn build_pay_reply(state: &Arc<AppState>, parent_phone: &str, balances: &[crate::models::ParentBalance]) -> String {
     let target = balances.iter().find(|b| b.outstanding > 0);
     let b = match target {
         Some(v) => v,
@@ -314,13 +314,12 @@ async fn build_pay_reply(state: &Arc<AppState>, balances: &[crate::models::Paren
     }).unwrap_or_default();
 
     let token: String = match lock_db(state) {
-        Ok(conn) => match commands::whatsapp::generate_payment_link_inner(&conn, &school_id, &inv_id, &b.admission_no) {
+        Ok(conn) => match commands::whatsapp::generate_payment_link_inner(&conn, &school_id, &inv_id, parent_phone) {
             Ok(link) => link.token,
             Err(e) => return format!("Couldn't create a payment link: {}", e),
         },
         Err(_) => return "Service busy, try again in a minute.".to_string(),
     };
-    // NOTE: phone stored on link is a placeholder here; /pay page lets parent edit it.
     let base = std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| "https://pay.edufy.finance".into());
     format!(
         "💳 *Pay {} for {}*\nTap to pay (valid 10 min):\n{}/pay/{}\n\nYou'll get an M-Pesa prompt on your phone. Enter your PIN to complete.",
@@ -388,6 +387,80 @@ async fn pay_snapshot(
         "amount": link.amount,
         "phone": link.phone,
         "expires_at": link.expires_at,
+    })))
+}
+
+#[derive(Deserialize)]
+struct PayConfirmReq { phone: String }
+
+/// Public STK Push trigger: POST /pay/:token/confirm { phone }
+/// Re-validates link, recomputes outstanding (never trusts the snapshot),
+/// initiates STK via the shared Daraja path, marks link single-use.
+async fn pay_confirm(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Path(token): Path<String>,
+    Json(a): Json<PayConfirmReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let phone = wa::normalize_ke_phone(&a.phone)
+        .ok_or_else(|| AppError("Enter a valid Safaricom number (e.g. 0712 345 678)".to_string()))?;
+
+    // Resolve + validate link under lock, capture what we need, then drop guard before awaits.
+    let (school_id, invoice_id, outstanding) = {
+        let conn = lock_db(&s)?;
+        let link = commands::whatsapp::resolve_payment_link_inner(&conn, &token).map_err(AppError)?;
+        let (net, status, inv_school): (i64, String, String) = conn.query_row(
+            "SELECT net_amount, status, school_id FROM invoices WHERE id = ?1",
+            rusqlite::params![link.invoice_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(|_| AppError("Invoice not found".to_string()))?;
+        if status == "paid" || status == "waived" {
+            return Err(AppError("This invoice is already settled.".to_string()));
+        }
+        let paid: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = ?1 AND status = 'completed'",
+            rusqlite::params![link.invoice_id],
+            |row| row.get(0),
+        ).map_err(|e| AppError(e.to_string()))?;
+        let out = (net - paid).max(0);
+        if out <= 0 {
+            return Err(AppError("This invoice is already settled.".to_string()));
+        }
+        // Link amount is a snapshot; charge live outstanding (caps over/under-payment).
+        (inv_school, link.invoice_id.clone(), out)
+    };
+
+    let tx = commands::mpesa::initiate_mpesa_payment_inner(
+        &s.db.0, &school_id, &invoice_id, &phone, outstanding,
+    ).await.map_err(AppError)?;
+
+    // Single-use: mark consumed only after STK accepted (pending) — failed STK keeps link usable.
+    if let Ok(conn) = lock_db(&s) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = conn.execute(
+            "UPDATE payment_links SET used_at = ?1 WHERE token = ?2",
+            rusqlite::params![now, token],
+        );
+    }
+
+    Ok(Json(serde_json::json!({
+        "transaction_id": tx.id,
+        "checkout_request_id": tx.checkout_request_id,
+        "status": tx.status,
+        "amount": outstanding,
+    })))
+}
+
+/// Public status poll: GET /pay/status/:transaction_id
+async fn pay_status(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Path(transaction_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let tx = commands::mpesa::check_mpesa_status_inner(&s.db.0, &transaction_id).await.map_err(AppError)?;
+    Ok(Json(serde_json::json!({
+        "status": tx.status,
+        "result_description": tx.result_description,
+        "mpesa_receipt": tx.mpesa_receipt,
+        "amount": tx.amount,
     })))
 }
 
@@ -703,6 +776,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/auth/login", post(login_handler))
         .route("/webhook/whatsapp", get(whatsapp_verify).post(whatsapp_webhook))
         .route("/pay/:token", get(pay_snapshot))
+        .route("/pay/:token/confirm", post(pay_confirm))
+        .route("/pay/status/:transaction_id", get(pay_status))
         .nest("/api", api_router())
         .fallback_service(ServeDir::new("dist").append_index_html_on_directories(true))
         .layer(cors)
