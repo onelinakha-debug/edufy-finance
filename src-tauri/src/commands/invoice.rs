@@ -1,29 +1,25 @@
 use crate::db::connection::DbState;
 use crate::models::{Invoice, InvoiceDetail, InvoiceItem};
 use crate::services::invoice_gen;
+use rusqlite::Connection;
 use tauri::State;
 
-#[tauri::command]
-pub fn generate_invoices(
-    state: State<'_, DbState>,
+pub fn generate_invoices_inner(
+    conn: &Connection,
     fee_structure_id: String,
     student_ids: Option<Vec<String>>,
 ) -> Result<Vec<Invoice>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-    invoice_gen::generate_invoices_for_structure(&conn, &fee_structure_id, student_ids)
+    invoice_gen::generate_invoices_for_structure(conn, &fee_structure_id, student_ids)
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn get_invoices(
-    state: State<'_, DbState>,
+pub fn get_invoices_inner(
+    conn: &Connection,
     student_id: Option<String>,
     status: Option<String>,
     limit: Option<i32>,
     offset: Option<i32>,
 ) -> Result<Vec<Invoice>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let mut sql = "SELECT id, invoice_no, student_id, fee_structure_id, total_amount, discount_amount, net_amount, status, due_date, created_at, paid_at
                    FROM invoices WHERE 1=1".to_string();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -74,13 +70,10 @@ pub fn get_invoices(
     Ok(invoices)
 }
 
-#[tauri::command]
-pub fn get_invoice_detail(
-    state: State<'_, DbState>,
+pub fn get_invoice_detail_inner(
+    conn: &Connection,
     id: String,
 ) -> Result<InvoiceDetail, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let invoice: Invoice = {
         let mut stmt = conn
             .prepare("SELECT id, invoice_no, student_id, fee_structure_id, total_amount, discount_amount, net_amount, status, due_date, created_at, paid_at FROM invoices WHERE id = ?1")
@@ -162,4 +155,35 @@ pub fn get_invoice_detail(
         student_name,
         admission_no,
     })
+}
+
+#[tauri::command]
+pub fn generate_invoices(
+    state: State<'_, DbState>,
+    fee_structure_id: String,
+    student_ids: Option<Vec<String>>,
+) -> Result<Vec<Invoice>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    generate_invoices_inner(&conn, fee_structure_id, student_ids)
+}
+
+#[tauri::command]
+pub fn get_invoices(
+    state: State<'_, DbState>,
+    student_id: Option<String>,
+    status: Option<String>,
+    limit: Option<i32>,
+    offset: Option<i32>,
+) -> Result<Vec<Invoice>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_invoices_inner(&conn, student_id, status, limit, offset)
+}
+
+#[tauri::command]
+pub fn get_invoice_detail(
+    state: State<'_, DbState>,
+    id: String,
+) -> Result<InvoiceDetail, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_invoice_detail_inner(&conn, id)
 }

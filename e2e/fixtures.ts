@@ -61,6 +61,7 @@ const MOCK_DATA = {
   ],
   get_age_analysis: [],
   list_users: [{ id: "u1", username: "admin", full_name: "Administrator", role: "admin", is_active: true, created_at: "2026-01-01T00:00:00.000Z" }],
+  login: { user: { id: "u1", username: "admin", full_name: "Administrator", role: "admin" }, token: "test-jwt-token", school_id: "school-1" },
   get_mpesa_config: null,
   get_setting: null,
   get_mpesa_transactions: [],
@@ -72,6 +73,13 @@ const test = base.extend<{ setupMock: void }>({
   setupMock: [async ({ page }, use) => {
     await page.addInitScript((dataJson: string) => {
       const data = JSON.parse(dataJson);
+
+      // Seed auth state so the auth guard passes
+      localStorage.setItem("auth_token", "test-jwt-token");
+      localStorage.setItem("auth_user", JSON.stringify({
+        id: "u1", username: "admin", full_name: "Administrator", role: "admin", school_id: "school-1",
+      }));
+
       (window as any).__TAURI_INTERNALS__ = {
         invoke: function(cmd: string, args?: unknown) {
           if (cmd in data) {

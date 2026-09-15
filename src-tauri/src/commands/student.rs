@@ -1,11 +1,11 @@
 use crate::db::connection::DbState;
 use crate::models::{Student, StudentDetail, Parent};
 use crate::utils::generate_id;
+use rusqlite::Connection;
 use tauri::State;
 
-#[tauri::command]
-pub fn create_student(
-    state: State<'_, DbState>,
+pub fn create_student_inner(
+    conn: &Connection,
     school_id: String,
     admission_no: String,
     first_name: String,
@@ -15,7 +15,6 @@ pub fn create_student(
     stream: Option<String>,
     enrollment_date: Option<String>,
 ) -> Result<Student, String> {
-    // Input validation
     if school_id.trim().is_empty() { return Err("School ID is required".to_string()); }
     if admission_no.trim().is_empty() { return Err("Admission number is required".to_string()); }
     if first_name.trim().is_empty() { return Err("First name is required".to_string()); }
@@ -25,9 +24,6 @@ pub fn create_student(
     if first_name.len() > 100 { return Err("First name too long (max 100 characters)".to_string()); }
     if last_name.len() > 100 { return Err("Last name too long (max 100 characters)".to_string()); }
 
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
-    // Check for duplicate admission number
     let exists: bool = {
         let mut stmt = conn
             .prepare("SELECT COUNT(*) FROM students WHERE admission_no = ?1")
@@ -68,15 +64,12 @@ pub fn create_student(
     })
 }
 
-#[tauri::command]
-pub fn get_students(
-    state: State<'_, DbState>,
+pub fn get_students_inner(
+    conn: &Connection,
     school_id: String,
     grade: Option<String>,
     status: Option<String>,
 ) -> Result<Vec<Student>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let mut sql = "SELECT id, admission_no, school_id, first_name, middle_name, last_name, grade, stream, status, enrollment_date, created_at
                    FROM students WHERE school_id = ?1".to_string();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(school_id)];
@@ -123,13 +116,10 @@ pub fn get_students(
     Ok(students)
 }
 
-#[tauri::command]
-pub fn get_student_detail(
-    state: State<'_, DbState>,
+pub fn get_student_detail_inner(
+    conn: &Connection,
     id: String,
 ) -> Result<StudentDetail, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let student: Student = {
         let mut stmt = conn
             .prepare(
@@ -155,7 +145,6 @@ pub fn get_student_detail(
         .map_err(|e| format!("Student not found: {}", e))?
     };
 
-    // Get parents
     let parents: Vec<Parent> = {
         let mut stmt = conn
             .prepare(
@@ -182,7 +171,6 @@ pub fn get_student_detail(
         parents
     };
 
-    // Get outstanding and paid totals
     let (total_invoiced, total_paid): (i64, i64) = {
         let mut stmt = conn
             .prepare(
@@ -198,7 +186,6 @@ pub fn get_student_detail(
 
     let outstanding_fees = total_invoiced - total_paid;
 
-    // Populate invoice summaries
     let invoices: Vec<crate::models::InvoiceSummary> = {
         let mut stmt = conn
             .prepare(
@@ -243,9 +230,8 @@ pub fn get_student_detail(
     })
 }
 
-#[tauri::command]
-pub fn update_student(
-    state: State<'_, DbState>,
+pub fn update_student_inner(
+    conn: &Connection,
     id: String,
     first_name: Option<String>,
     last_name: Option<String>,
@@ -254,8 +240,6 @@ pub fn update_student(
     stream: Option<String>,
     status: Option<String>,
 ) -> Result<Student, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let mut updates = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -277,10 +261,6 @@ pub fn update_student(
     conn.execute(&sql, param_refs.as_slice())
         .map_err(|e| e.to_string())?;
 
-    drop(conn);
-
-    // Return updated student
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare("SELECT id, admission_no, school_id, first_name, middle_name, last_name, grade, stream, status, enrollment_date, created_at FROM students WHERE id = ?1")
         .map_err(|e| e.to_string())?;
@@ -303,10 +283,65 @@ pub fn update_student(
     .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn delete_student(state: State<'_, DbState>, id: String) -> Result<(), String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+pub fn delete_student_inner(conn: &Connection, id: String) -> Result<(), String> {
     conn.execute("DELETE FROM students WHERE id = ?1", [&id])
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn create_student(
+    state: State<'_, DbState>,
+    school_id: String,
+    admission_no: String,
+    first_name: String,
+    last_name: String,
+    middle_name: Option<String>,
+    grade: String,
+    stream: Option<String>,
+    enrollment_date: Option<String>,
+) -> Result<Student, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    create_student_inner(&conn, school_id, admission_no, first_name, last_name, middle_name, grade, stream, enrollment_date)
+}
+
+#[tauri::command]
+pub fn get_students(
+    state: State<'_, DbState>,
+    school_id: String,
+    grade: Option<String>,
+    status: Option<String>,
+) -> Result<Vec<Student>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_students_inner(&conn, school_id, grade, status)
+}
+
+#[tauri::command]
+pub fn get_student_detail(
+    state: State<'_, DbState>,
+    id: String,
+) -> Result<StudentDetail, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_student_detail_inner(&conn, id)
+}
+
+#[tauri::command]
+pub fn update_student(
+    state: State<'_, DbState>,
+    id: String,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    middle_name: Option<String>,
+    grade: Option<String>,
+    stream: Option<String>,
+    status: Option<String>,
+) -> Result<Student, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    update_student_inner(&conn, id, first_name, last_name, middle_name, grade, stream, status)
+}
+
+#[tauri::command]
+pub fn delete_student(state: State<'_, DbState>, id: String) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    delete_student_inner(&conn, id)
 }

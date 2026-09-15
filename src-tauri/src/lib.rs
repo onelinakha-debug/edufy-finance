@@ -1,6 +1,8 @@
+mod auth;
 mod commands;
 mod db;
 mod models;
+pub mod server;
 mod services;
 mod utils;
 
@@ -104,7 +106,15 @@ pub fn run() {
             commands::mpesa::match_c2b_payment,
             // Dashboard
             commands::dashboard::get_dashboard_stats,
+            // Auth
+            commands::settings::login,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Edufy Finance");
+}
+
+/// Run as HTTP web server (for browser/mobile access)
+pub fn run_web_server() {
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    rt.block_on(server::start());
 }

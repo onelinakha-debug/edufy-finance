@@ -2,19 +2,58 @@ function isTauriAvailable(): boolean {
   return typeof window !== "undefined" && "__TAURI__" in window;
 }
 
-async function cmd<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  if (!isTauriAvailable()) {
-    console.warn(`Tauri not available, skipping command: ${command}`);
-    return undefined as T;
-  }
-  const { invoke } = await import("@tauri-apps/api/core");
+function getAuthToken(): string | null {
   try {
-    return await invoke<T>(command, args);
-  } catch (error) {
-    console.error(`Command failed: ${command}`, error);
-    throw error;
+    return localStorage.getItem("auth_token");
+  } catch {
+    return null;
   }
 }
+
+async function httpCmd<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const token = getAuthToken();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`/api/${command}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(args ?? {}),
+  });
+
+  if (res.status === 401) {
+    localStorage.removeItem("auth_token");
+    localStorage.removeItem("auth_user");
+    window.location.href = "/login";
+    throw new Error("Unauthorized");
+  }
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error || `Request failed: ${res.status}`);
+  }
+
+  return res.json() as Promise<T>;
+}
+
+async function cmd<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (isTauriAvailable()) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    try {
+      return await invoke<T>(command, args);
+    } catch (error) {
+      console.error(`Command failed: ${command}`, error);
+      throw error;
+    }
+  }
+  return httpCmd<T>(command, args);
+}
+
+// ═══ AUTH ═══
+export const authApi = {
+  login: (data: { username: string; password: string; school_id: string }) =>
+    cmd<{ user: { id: string; username: string; full_name: string; role: string }; token: string; school_id: string }>("login", data),
+};
 
 // ═══ SCHOOL ═══
 export const schoolApi = {
@@ -55,7 +94,6 @@ export const feeApi = {
   getVoteHeads: (feeStructureId: string) =>
     cmd<any[]>("get_vote_heads", { feeStructureId }),
 
-  // Discount configs
   listDiscountConfigs: (schoolId: string) =>
     cmd<any[]>("get_discount_configs", { schoolId }),
   addDiscountConfig: (data: { school_id: string; name: string; type: string; rate: number; min_students: number; is_active: boolean }) => {
@@ -105,7 +143,6 @@ export const mpesaApi = {
     cmd<any>("check_mpesa_status", { transactionId }),
   listTransactions: (schoolId: string, limit?: number) =>
     cmd<any[]>("get_mpesa_transactions", { schoolId, limit }),
-  // C2B
   registerC2bUrls: (schoolId: string) =>
     cmd<string>("register_c2b_urls", { schoolId }),
   startC2bServer: (schoolId: string, port?: number) =>
@@ -142,7 +179,6 @@ export const settingsApi = {
   backup: () =>
     cmd<string>("backup_database"),
 
-  // School profile
   getSchoolProfile: (schoolId: string) =>
     cmd<any>("get_school_profile", { schoolId }),
   updateSchoolProfile: (schoolId: string, data: Record<string, unknown>) => {
@@ -150,7 +186,6 @@ export const settingsApi = {
     return cmd<any>("update_school_profile", { schoolId, school_type: type, ...rest });
   },
 
-  // User management
   listUsers: (schoolId: string) =>
     cmd<any[]>("list_users", { schoolId }),
   createUser: (schoolId: string, data: { username: string; password: string; full_name: string; role: string }) =>

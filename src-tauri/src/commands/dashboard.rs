@@ -1,14 +1,9 @@
 use crate::db::connection::DbState;
 use crate::models::{DashboardStats, TermSummary, RecentPayment, TopOutstanding};
+use rusqlite::Connection;
 use tauri::State;
 
-#[tauri::command]
-pub fn get_dashboard_stats(
-    state: State<'_, DbState>,
-    school_id: String,
-) -> Result<DashboardStats, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
+pub fn get_dashboard_stats_inner(conn: &Connection, school_id: String) -> Result<DashboardStats, String> {
     // Single optimized query combining student count, collection stats, and outstanding
     let total_students: i64 = conn
         .query_row(
@@ -148,4 +143,13 @@ pub fn get_dashboard_stats(
         top_outstanding,
         term_summary,
     })
+}
+
+#[tauri::command]
+pub fn get_dashboard_stats(
+    state: State<'_, DbState>,
+    school_id: String,
+) -> Result<DashboardStats, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_dashboard_stats_inner(&conn, school_id)
 }

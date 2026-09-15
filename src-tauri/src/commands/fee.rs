@@ -1,11 +1,11 @@
+use rusqlite::Connection;
 use crate::db::connection::DbState;
 use crate::models::{FeeStructure, VoteHead, DiscountConfig};
 use crate::utils::generate_id;
 use tauri::State;
 
-#[tauri::command]
-pub fn create_fee_structure(
-    state: State<'_, DbState>,
+pub fn create_fee_structure_inner(
+    conn: &Connection,
     school_id: String,
     name: String,
     grade: String,
@@ -18,7 +18,6 @@ pub fn create_fee_structure(
     if !(1..=4).contains(&term) { return Err("Term must be between 1 and 4".to_string()); }
     if academic_year < 2020 || academic_year > 2100 { return Err("Invalid academic year".to_string()); }
 
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
     let id = generate_id();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -41,15 +40,12 @@ pub fn create_fee_structure(
     })
 }
 
-#[tauri::command]
-pub fn get_fee_structures(
-    state: State<'_, DbState>,
+pub fn get_fee_structures_inner(
+    conn: &Connection,
     school_id: String,
     academic_year: Option<i32>,
     term: Option<i32>,
 ) -> Result<Vec<FeeStructure>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let mut sql = "SELECT id, school_id, name, grade, term, academic_year, is_active, created_at
                    FROM fee_structures WHERE school_id = ?1 AND is_active = 1".to_string();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(school_id)];
@@ -91,9 +87,8 @@ pub fn get_fee_structures(
     Ok(structures)
 }
 
-#[tauri::command]
-pub fn add_vote_head(
-    state: State<'_, DbState>,
+pub fn add_vote_head_inner(
+    conn: &Connection,
     fee_structure_id: String,
     name: String,
     category: String,
@@ -106,7 +101,6 @@ pub fn add_vote_head(
     if category.trim().is_empty() { return Err("Category is required".to_string()); }
     if amount < 0 { return Err("Amount cannot be negative".to_string()); }
 
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
     let id = generate_id();
     let mandatory = is_mandatory.unwrap_or(true);
     let order = sort_order.unwrap_or(0);
@@ -129,12 +123,10 @@ pub fn add_vote_head(
     })
 }
 
-#[tauri::command]
-pub fn get_vote_heads(
-    state: State<'_, DbState>,
+pub fn get_vote_heads_inner(
+    conn: &Connection,
     fee_structure_id: String,
 ) -> Result<Vec<VoteHead>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
             "SELECT id, fee_structure_id, name, category, amount, is_mandatory, sort_order
@@ -166,12 +158,10 @@ pub fn get_vote_heads(
 
 // ═══ DISCOUNT CONFIGS ═══
 
-#[tauri::command]
-pub fn get_discount_configs(
-    state: State<'_, DbState>,
+pub fn get_discount_configs_inner(
+    conn: &Connection,
     school_id: String,
 ) -> Result<Vec<DiscountConfig>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
             "SELECT id, school_id, name, type, rate, min_students, is_active
@@ -198,9 +188,8 @@ pub fn get_discount_configs(
     Ok(configs)
 }
 
-#[tauri::command]
-pub fn add_discount_config(
-    state: State<'_, DbState>,
+pub fn add_discount_config_inner(
+    conn: &Connection,
     school_id: String,
     name: String,
     discount_type: String,
@@ -217,7 +206,6 @@ pub fn add_discount_config(
     if rate < 0.0 || rate > 100.0 { return Err("Rate must be between 0 and 100".to_string()); }
     if min_students < 1 { return Err("Minimum students must be at least 1".to_string()); }
 
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
     let id = generate_id();
 
     conn.execute(
@@ -238,13 +226,92 @@ pub fn add_discount_config(
     })
 }
 
+pub fn remove_discount_config_inner(
+    conn: &Connection,
+    id: String,
+) -> Result<(), String> {
+    conn.execute("DELETE FROM discount_configs WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ═══ TAURI WRAPPERS ═══
+
+#[tauri::command]
+pub fn create_fee_structure(
+    state: State<'_, DbState>,
+    school_id: String,
+    name: String,
+    grade: String,
+    term: i32,
+    academic_year: i32,
+) -> Result<FeeStructure, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    create_fee_structure_inner(&conn, school_id, name, grade, term, academic_year)
+}
+
+#[tauri::command]
+pub fn get_fee_structures(
+    state: State<'_, DbState>,
+    school_id: String,
+    academic_year: Option<i32>,
+    term: Option<i32>,
+) -> Result<Vec<FeeStructure>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_fee_structures_inner(&conn, school_id, academic_year, term)
+}
+
+#[tauri::command]
+pub fn add_vote_head(
+    state: State<'_, DbState>,
+    fee_structure_id: String,
+    name: String,
+    category: String,
+    amount: i64,
+    is_mandatory: Option<bool>,
+    sort_order: Option<i32>,
+) -> Result<VoteHead, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    add_vote_head_inner(&conn, fee_structure_id, name, category, amount, is_mandatory, sort_order)
+}
+
+#[tauri::command]
+pub fn get_vote_heads(
+    state: State<'_, DbState>,
+    fee_structure_id: String,
+) -> Result<Vec<VoteHead>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_vote_heads_inner(&conn, fee_structure_id)
+}
+
+#[tauri::command]
+pub fn get_discount_configs(
+    state: State<'_, DbState>,
+    school_id: String,
+) -> Result<Vec<DiscountConfig>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_discount_configs_inner(&conn, school_id)
+}
+
+#[tauri::command]
+pub fn add_discount_config(
+    state: State<'_, DbState>,
+    school_id: String,
+    name: String,
+    discount_type: String,
+    rate: f64,
+    min_students: i32,
+    is_active: bool,
+) -> Result<DiscountConfig, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    add_discount_config_inner(&conn, school_id, name, discount_type, rate, min_students, is_active)
+}
+
 #[tauri::command]
 pub fn remove_discount_config(
     state: State<'_, DbState>,
     id: String,
 ) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM discount_configs WHERE id = ?1", rusqlite::params![id])
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    remove_discount_config_inner(&conn, id)
 }

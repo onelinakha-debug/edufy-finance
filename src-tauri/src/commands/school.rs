@@ -1,11 +1,11 @@
 use crate::db::connection::DbState;
 use crate::models::School;
 use crate::utils::generate_id;
+use rusqlite::Connection;
 use tauri::State;
 
-#[tauri::command]
-pub fn create_school(
-    state: State<'_, DbState>,
+pub fn create_school_inner(
+    conn: &Connection,
     name: String,
     school_type: String,
     curriculum: Option<String>,
@@ -26,7 +26,6 @@ pub fn create_school(
         if !p.is_empty() && p.len() < 10 { return Err("Phone number must be at least 10 characters".to_string()); }
     }
 
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
     let id = generate_id();
     let now = chrono::Utc::now().to_rfc3339();
     let curriculum = curriculum.unwrap_or_else(|| "cbc".to_string());
@@ -40,7 +39,7 @@ pub fn create_school(
 
     Ok(School {
         id,
-        name: name,
+        name,
         school_type,
         curriculum,
         county,
@@ -57,9 +56,7 @@ pub fn create_school(
     })
 }
 
-#[tauri::command]
-pub fn get_school(state: State<'_, DbState>, id: String) -> Result<School, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+pub fn get_school_inner(conn: &Connection, id: String) -> Result<School, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, name, type, curriculum, county, sub_county, registration,
@@ -91,9 +88,8 @@ pub fn get_school(state: State<'_, DbState>, id: String) -> Result<School, Strin
     .map_err(|e| format!("School not found: {}", e))
 }
 
-#[tauri::command]
-pub fn update_school(
-    state: State<'_, DbState>,
+pub fn update_school_inner(
+    conn: &Connection,
     id: String,
     name: Option<String>,
     school_type: Option<String>,
@@ -103,63 +99,32 @@ pub fn update_school(
     mpesa_paybill: Option<String>,
     mpesa_till: Option<String>,
 ) -> Result<School, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Build dynamic update query
     let mut updates = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-    if let Some(v) = &name {
-        updates.push("name = ?");
-        params.push(Box::new(v.clone()));
-    }
-    if let Some(v) = &school_type {
-        updates.push("type = ?");
-        params.push(Box::new(v.clone()));
-    }
-    if let Some(v) = &county {
-        updates.push("county = ?");
-        params.push(Box::new(v.clone()));
-    }
-    if let Some(v) = &phone {
-        updates.push("phone = ?");
-        params.push(Box::new(v.clone()));
-    }
-    if let Some(v) = &email {
-        updates.push("email = ?");
-        params.push(Box::new(v.clone()));
-    }
-    if let Some(v) = &mpesa_paybill {
-        updates.push("mpesa_paybill = ?");
-        params.push(Box::new(v.clone()));
-    }
-    if let Some(v) = &mpesa_till {
-        updates.push("mpesa_till = ?");
-        params.push(Box::new(v.clone()));
-    }
+    if let Some(v) = &name { updates.push("name = ?"); params.push(Box::new(v.clone())); }
+    if let Some(v) = &school_type { updates.push("type = ?"); params.push(Box::new(v.clone())); }
+    if let Some(v) = &county { updates.push("county = ?"); params.push(Box::new(v.clone())); }
+    if let Some(v) = &phone { updates.push("phone = ?"); params.push(Box::new(v.clone())); }
+    if let Some(v) = &email { updates.push("email = ?"); params.push(Box::new(v.clone())); }
+    if let Some(v) = &mpesa_paybill { updates.push("mpesa_paybill = ?"); params.push(Box::new(v.clone())); }
+    if let Some(v) = &mpesa_till { updates.push("mpesa_till = ?"); params.push(Box::new(v.clone())); }
 
     updates.push("updated_at = ?");
-    params.push(Box::new(now.clone()));
-
+    params.push(Box::new(now));
     params.push(Box::new(id.clone()));
 
-    let sql = format!(
-        "UPDATE schools SET {} WHERE id = ?",
-        updates.join(", ")
-    );
-
+    let sql = format!("UPDATE schools SET {} WHERE id = ?", updates.join(", "));
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     conn.execute(&sql, param_refs.as_slice())
         .map_err(|e| e.to_string())?;
 
-    drop(conn);
-    get_school(state, id)
+    get_school_inner(conn, id)
 }
 
-#[tauri::command]
-pub fn list_schools(state: State<'_, DbState>) -> Result<Vec<School>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+pub fn list_schools_inner(conn: &Connection) -> Result<Vec<School>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, name, type, curriculum, county, sub_county, registration,
@@ -194,4 +159,48 @@ pub fn list_schools(state: State<'_, DbState>) -> Result<Vec<School>, String> {
         .collect();
 
     Ok(schools)
+}
+
+// ═══ TAURI COMMANDS (thin wrappers) ═══
+
+#[tauri::command]
+pub fn create_school(
+    state: State<'_, DbState>,
+    name: String,
+    school_type: String,
+    curriculum: Option<String>,
+    county: Option<String>,
+    phone: Option<String>,
+    email: Option<String>,
+) -> Result<School, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    create_school_inner(&conn, name, school_type, curriculum, county, phone, email)
+}
+
+#[tauri::command]
+pub fn get_school(state: State<'_, DbState>, id: String) -> Result<School, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_school_inner(&conn, id)
+}
+
+#[tauri::command]
+pub fn update_school(
+    state: State<'_, DbState>,
+    id: String,
+    name: Option<String>,
+    school_type: Option<String>,
+    county: Option<String>,
+    phone: Option<String>,
+    email: Option<String>,
+    mpesa_paybill: Option<String>,
+    mpesa_till: Option<String>,
+) -> Result<School, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    update_school_inner(&conn, id, name, school_type, county, phone, email, mpesa_paybill, mpesa_till)
+}
+
+#[tauri::command]
+pub fn list_schools(state: State<'_, DbState>) -> Result<Vec<School>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    list_schools_inner(&conn)
 }

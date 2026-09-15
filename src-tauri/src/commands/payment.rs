@@ -1,11 +1,11 @@
 use crate::db::connection::DbState;
 use crate::models::{Payment, PaymentDetail};
 use crate::utils::generate_id;
+use rusqlite::Connection;
 use tauri::State;
 
-#[tauri::command]
-pub fn record_payment(
-    state: State<'_, DbState>,
+pub fn record_payment_inner(
+    conn: &Connection,
     invoice_id: String,
     amount: i64,
     method: String,
@@ -20,10 +20,11 @@ pub fn record_payment(
 
     let valid_methods = ["cash", "mpesa", "bank", "cheque"];
     if !valid_methods.contains(&method.as_str()) {
-        return Err(format!("Invalid payment method '{}'. Must be one of: cash, mpesa, bank, cheque", method));
+        return Err(format!(
+            "Invalid payment method '{}'. Must be one of: cash, mpesa, bank, cheque",
+            method
+        ));
     }
-
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
 
     // Check for duplicate M-Pesa receipt BEFORE any writes
     if let Some(ref receipt) = mpesa_receipt {
@@ -32,10 +33,14 @@ pub fn record_payment(
                 let mut stmt = conn
                     .prepare("SELECT COUNT(*) FROM payments WHERE mpesa_receipt = ?1 AND status = 'completed'")
                     .map_err(|e| e.to_string())?;
-                stmt.query_row([receipt.as_str()], |row| row.get(0)).map_err(|e| e.to_string())?
+                stmt.query_row([receipt.as_str()], |row| row.get(0))
+                    .map_err(|e| e.to_string())?
             };
             if existing > 0 {
-                return Err(format!("M-Pesa receipt '{}' has already been recorded", receipt));
+                return Err(format!(
+                    "M-Pesa receipt '{}' has already been recorded",
+                    receipt
+                ));
             }
         }
     }
@@ -52,14 +57,20 @@ pub fn record_payment(
     // Calculate current paid amount
     let current_paid: i64 = {
         let mut stmt = conn
-            .prepare("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE invoice_id = ?1 AND status = 'completed'")
+            .prepare(
+                "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE invoice_id = ?1 AND status = 'completed'",
+            )
             .map_err(|e| e.to_string())?;
-        stmt.query_row([&invoice_id], |row| row.get(0)).map_err(|e| e.to_string())?
+        stmt.query_row([&invoice_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?
     };
 
     let outstanding = net_amount - current_paid;
     if amount > outstanding {
-        return Err(format!("Amount {} exceeds outstanding balance of {}", amount, outstanding));
+        return Err(format!(
+            "Amount {} exceeds outstanding balance of {}",
+            amount, outstanding
+        ));
     }
 
     let id = generate_id();
@@ -77,7 +88,7 @@ pub fn record_payment(
         )
         .map_err(|e| e.to_string())?;
 
-        update_invoice_status(&conn, &invoice_id).map_err(|e| e.to_string())?;
+        update_invoice_status(conn, &invoice_id).map_err(|e| e.to_string())?;
 
         Ok(())
     })();
@@ -108,21 +119,19 @@ pub fn record_payment(
     }
 }
 
-#[tauri::command]
-pub fn get_payments(
-    state: State<'_, DbState>,
+pub fn get_payments_inner(
+    conn: &Connection,
     student_id: Option<String>,
     method: Option<String>,
     limit: Option<i32>,
     offset: Option<i32>,
 ) -> Result<Vec<Payment>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let mut sql = "SELECT p.id, p.payment_no, p.invoice_id, p.student_id, p.amount, p.method, p.reference, p.mpesa_receipt, p.status, p.notes, p.received_by, p.created_at, p.confirmed_at,
                    p.student_id, s.first_name, s.last_name, s.admission_no
                    FROM payments p
                    LEFT JOIN students s ON p.student_id = s.id
-                   WHERE 1=1".to_string();
+                   WHERE 1=1"
+        .to_string();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(s) = &student_id {
@@ -143,7 +152,8 @@ pub fn get_payments(
     params.push(Box::new(off));
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params.iter().map(|p| p.as_ref()).collect();
 
     let payments: Vec<Payment> = stmt
         .query_map(param_refs.as_slice(), |row| {
@@ -170,13 +180,10 @@ pub fn get_payments(
     Ok(payments)
 }
 
-#[tauri::command]
-pub fn get_payment_detail(
-    state: State<'_, DbState>,
+pub fn get_payment_detail_inner(
+    conn: &Connection,
     id: String,
 ) -> Result<PaymentDetail, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let payment: Payment = {
         let mut stmt = conn
             .prepare("SELECT id, payment_no, invoice_id, student_id, amount, method, reference, mpesa_receipt, status, notes, received_by, created_at, confirmed_at FROM payments WHERE id = ?1")
@@ -205,8 +212,10 @@ pub fn get_payment_detail(
         let mut stmt = conn
             .prepare("SELECT first_name || ' ' || last_name, admission_no FROM students WHERE id = ?1")
             .map_err(|e| e.to_string())?;
-        stmt.query_row([&payment.student_id], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| e.to_string())?
+        stmt.query_row([&payment.student_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(|e| e.to_string())?
     };
 
     let invoice_no: String = {
@@ -223,6 +232,42 @@ pub fn get_payment_detail(
         admission_no,
         invoice_no,
     })
+}
+
+#[tauri::command]
+pub fn record_payment(
+    state: State<'_, DbState>,
+    invoice_id: String,
+    amount: i64,
+    method: String,
+    reference: Option<String>,
+    mpesa_receipt: Option<String>,
+    notes: Option<String>,
+    received_by: Option<String>,
+) -> Result<Payment, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    record_payment_inner(&conn, invoice_id, amount, method, reference, mpesa_receipt, notes, received_by)
+}
+
+#[tauri::command]
+pub fn get_payments(
+    state: State<'_, DbState>,
+    student_id: Option<String>,
+    method: Option<String>,
+    limit: Option<i32>,
+    offset: Option<i32>,
+) -> Result<Vec<Payment>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_payments_inner(&conn, student_id, method, limit, offset)
+}
+
+#[tauri::command]
+pub fn get_payment_detail(
+    state: State<'_, DbState>,
+    id: String,
+) -> Result<PaymentDetail, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_payment_detail_inner(&conn, id)
 }
 
 pub fn update_invoice_status(conn: &rusqlite::Connection, invoice_id: &str) -> Result<(), rusqlite::Error> {

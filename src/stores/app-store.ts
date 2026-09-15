@@ -1,6 +1,21 @@
 import { create } from "zustand";
 
+interface AuthUser {
+  id: string;
+  username: string;
+  full_name: string;
+  role: string;
+  school_id: string;
+}
+
 interface AppState {
+  // Auth
+  isAuthenticated: boolean;
+  authUser: AuthUser | null;
+  authToken: string | null;
+  login: (user: AuthUser, token: string) => void;
+  logout: () => void;
+
   // Sidebar
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -33,7 +48,36 @@ interface Toast {
   variant?: "default" | "success" | "error" | "warning";
 }
 
+function loadAuth(): { user: AuthUser | null; token: string | null } {
+  try {
+    const token = localStorage.getItem("auth_token");
+    const userRaw = localStorage.getItem("auth_user");
+    if (token && userRaw) {
+      return { user: JSON.parse(userRaw), token };
+    }
+  } catch {
+    // corrupted storage
+  }
+  return { user: null, token: null };
+}
+
+const initial = loadAuth();
+
 export const useAppStore = create<AppState>((set) => ({
+  isAuthenticated: !!initial.token,
+  authUser: initial.user,
+  authToken: initial.token,
+  login: (user, token) => {
+    localStorage.setItem("auth_token", token);
+    localStorage.setItem("auth_user", JSON.stringify(user));
+    set({ isAuthenticated: true, authUser: user, authToken: token, currentSchoolId: user.school_id });
+  },
+  logout: () => {
+    localStorage.removeItem("auth_token");
+    localStorage.removeItem("auth_user");
+    set({ isAuthenticated: false, authUser: null, authToken: null, currentSchoolId: null });
+  },
+
   sidebarCollapsed: false,
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 
@@ -49,7 +93,7 @@ export const useAppStore = create<AppState>((set) => ({
       return { theme: next };
     }),
 
-  currentSchoolId: null,
+  currentSchoolId: initial.user?.school_id ?? null,
   setCurrentSchoolId: (id) => set({ currentSchoolId: id }),
 
   activeModal: null,

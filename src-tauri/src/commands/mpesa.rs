@@ -3,18 +3,14 @@ use crate::models::{MpesaConfig, MpesaTransaction};
 use crate::services::daraja::DarajaClient;
 use crate::services::c2b_server::{self, C2bServerState};
 use crate::utils::generate_id;
+use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 use tokio::sync::OnceCell;
 
 // ═══ M-Pesa Config ═══
 
-#[tauri::command]
-pub fn get_mpesa_config(
-    state: State<'_, DbState>,
-    school_id: String,
-) -> Result<Option<MpesaConfig>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+pub fn get_mpesa_config_inner(conn: &Connection, school_id: &str) -> Result<Option<MpesaConfig>, String> {
     let result = conn.query_row(
         "SELECT id, school_id, consumer_key, consumer_secret, passkey, shortcode, callback_url, is_active, created_at, updated_at
          FROM mpesa_configs WHERE school_id = ?1",
@@ -42,8 +38,16 @@ pub fn get_mpesa_config(
 }
 
 #[tauri::command]
-pub fn save_mpesa_config(
+pub fn get_mpesa_config(
     state: State<'_, DbState>,
+    school_id: String,
+) -> Result<Option<MpesaConfig>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_mpesa_config_inner(&conn, &school_id)
+}
+
+pub fn save_mpesa_config_inner(
+    conn: &Connection,
     school_id: String,
     consumer_key: String,
     consumer_secret: String,
@@ -51,7 +55,6 @@ pub fn save_mpesa_config(
     shortcode: String,
     callback_url: Option<String>,
 ) -> Result<MpesaConfig, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
 
     // Upsert: delete existing then insert — wrapped in transaction
@@ -99,6 +102,20 @@ pub fn save_mpesa_config(
         created_at: now.clone(),
         updated_at: now,
     })
+}
+
+#[tauri::command]
+pub fn save_mpesa_config(
+    state: State<'_, DbState>,
+    school_id: String,
+    consumer_key: String,
+    consumer_secret: String,
+    passkey: String,
+    shortcode: String,
+    callback_url: Option<String>,
+) -> Result<MpesaConfig, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    save_mpesa_config_inner(&conn, school_id, consumer_key, consumer_secret, passkey, shortcode, callback_url)
 }
 
 #[tauri::command]
@@ -370,15 +387,9 @@ pub async fn check_mpesa_status(
     ).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn get_mpesa_transactions(
-    state: State<'_, DbState>,
-    school_id: String,
-    limit: Option<i32>,
-) -> Result<Vec<MpesaTransaction>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let lim = limit.unwrap_or(50);
+// ═══ Transaction Queries ═══
 
+pub fn get_mpesa_transactions_inner(conn: &Connection, school_id: &str, limit: i32) -> Result<Vec<MpesaTransaction>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, school_id, invoice_id, merchant_request_id, checkout_request_id, phone, amount, account_reference, status, result_code, result_description, mpesa_receipt, raw_callback, created_at, updated_at
@@ -387,7 +398,7 @@ pub fn get_mpesa_transactions(
         .map_err(|e| e.to_string())?;
 
     let transactions: Vec<MpesaTransaction> = stmt
-        .query_map(rusqlite::params![school_id, lim], |row| {
+        .query_map(rusqlite::params![school_id, limit], |row| {
             Ok(MpesaTransaction {
                 id: row.get(0)?,
                 school_id: row.get(1)?,
@@ -411,6 +422,17 @@ pub fn get_mpesa_transactions(
         .collect();
 
     Ok(transactions)
+}
+
+#[tauri::command]
+pub fn get_mpesa_transactions(
+    state: State<'_, DbState>,
+    school_id: String,
+    limit: Option<i32>,
+) -> Result<Vec<MpesaTransaction>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let lim = limit.unwrap_or(50);
+    get_mpesa_transactions_inner(&conn, &school_id, lim)
 }
 
 // ═══ C2B ═══
@@ -494,15 +516,7 @@ pub async fn start_c2b_server(
     ))
 }
 
-#[tauri::command]
-pub async fn get_c2b_transactions(
-    state: State<'_, DbState>,
-    school_id: String,
-    limit: Option<i32>,
-) -> Result<Vec<MpesaTransaction>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let lim = limit.unwrap_or(50);
-
+pub fn get_c2b_transactions_inner(conn: &Connection, school_id: &str, limit: i32) -> Result<Vec<MpesaTransaction>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, school_id, invoice_id, merchant_request_id, checkout_request_id, phone, amount, account_reference, status, result_code, result_description, mpesa_receipt, raw_callback, created_at, updated_at
@@ -513,7 +527,7 @@ pub async fn get_c2b_transactions(
         .map_err(|e| e.to_string())?;
 
     let transactions: Vec<MpesaTransaction> = stmt
-        .query_map(rusqlite::params![school_id, lim], |row| {
+        .query_map(rusqlite::params![school_id, limit], |row| {
             Ok(MpesaTransaction {
                 id: row.get(0)?,
                 school_id: row.get(1)?,
@@ -540,34 +554,36 @@ pub async fn get_c2b_transactions(
 }
 
 #[tauri::command]
-pub async fn match_c2b_payment(
+pub fn get_c2b_transactions(
     state: State<'_, DbState>,
-    transaction_id: String,
-    invoice_id: String,
-) -> Result<MpesaTransaction, String> {
-    let (tx_amount, _tx_phone, tx_receipt, _school_id) = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT amount, phone, mpesa_receipt, school_id FROM mpesa_transactions WHERE id = ?1",
-            rusqlite::params![transaction_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?)),
-        )
-        .map_err(|e| format!("Transaction not found: {}", e))?
-    };
+    school_id: String,
+    limit: Option<i32>,
+) -> Result<Vec<MpesaTransaction>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let lim = limit.unwrap_or(50);
+    get_c2b_transactions_inner(&conn, &school_id, lim)
+}
 
-    let (student_id, net_amount, _school_id_from_inv): (String, i64, String) = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT student_id, net_amount, school_id FROM invoices WHERE id = ?1",
-            rusqlite::params![invoice_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(|e| format!("Invoice not found: {}", e))?
-    };
+pub fn match_c2b_payment_inner(
+    conn: &Connection,
+    transaction_id: &str,
+    invoice_id: &str,
+) -> Result<MpesaTransaction, String> {
+    let (tx_amount, _tx_phone, tx_receipt, _school_id) = conn.query_row(
+        "SELECT amount, phone, mpesa_receipt, school_id FROM mpesa_transactions WHERE id = ?1",
+        rusqlite::params![transaction_id],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?)),
+    )
+    .map_err(|e| format!("Transaction not found: {}", e))?;
+
+    let (student_id, net_amount, _school_id_from_inv): (String, i64, String) = conn.query_row(
+        "SELECT student_id, net_amount, school_id FROM invoices WHERE id = ?1",
+        rusqlite::params![invoice_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .map_err(|e| format!("Invoice not found: {}", e))?;
 
     let now = chrono::Utc::now().to_rfc3339();
-
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
 
     // Wrap all writes in a transaction
     conn.execute("BEGIN", []).map_err(|e| e.to_string())?;
@@ -651,4 +667,14 @@ pub async fn match_c2b_payment(
         },
     )
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn match_c2b_payment(
+    state: State<'_, DbState>,
+    transaction_id: String,
+    invoice_id: String,
+) -> Result<MpesaTransaction, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    match_c2b_payment_inner(&conn, &transaction_id, &invoice_id)
 }

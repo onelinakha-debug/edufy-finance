@@ -1,16 +1,14 @@
 use crate::db::connection::DbState;
 use crate::models::{CollectionSummary, AgeBucket, StudentOutstanding, StudentHistoryEntry, GradeCollection, MethodCollection, VoteHeadCollection, DailyCollection};
+use rusqlite::Connection;
 use tauri::State;
 
-#[tauri::command]
-pub fn get_collection_summary(
-    state: State<'_, DbState>,
+pub fn get_collection_summary_inner(
+    conn: &Connection,
     school_id: String,
     academic_year: i32,
     term: Option<i32>,
 ) -> Result<CollectionSummary, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let mut filters = vec!["i.student_id IN (SELECT id FROM students WHERE school_id = ?1)"];
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(school_id.clone())];
 
@@ -135,14 +133,22 @@ pub fn get_collection_summary(
 }
 
 #[tauri::command]
-pub fn get_outstanding_report(
+pub fn get_collection_summary(
     state: State<'_, DbState>,
+    school_id: String,
+    academic_year: i32,
+    term: Option<i32>,
+) -> Result<CollectionSummary, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_collection_summary_inner(&conn, school_id, academic_year, term)
+}
+
+pub fn get_outstanding_report_inner(
+    conn: &Connection,
     school_id: String,
     academic_year: Option<i32>,
     term: Option<i32>,
 ) -> Result<Vec<StudentOutstanding>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let mut filters = vec!["s.school_id = ?1", "s.status = 'active'"];
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(school_id)];
 
@@ -205,12 +211,20 @@ pub fn get_outstanding_report(
 }
 
 #[tauri::command]
-pub fn get_age_analysis(
+pub fn get_outstanding_report(
     state: State<'_, DbState>,
+    school_id: String,
+    academic_year: Option<i32>,
+    term: Option<i32>,
+) -> Result<Vec<StudentOutstanding>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_outstanding_report_inner(&conn, school_id, academic_year, term)
+}
+
+pub fn get_age_analysis_inner(
+    conn: &Connection,
     _school_id: String,
 ) -> Result<Vec<AgeBucket>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let mut stmt = conn
         .prepare(
             "SELECT
@@ -247,12 +261,18 @@ pub fn get_age_analysis(
 }
 
 #[tauri::command]
-pub fn get_student_history(
+pub fn get_age_analysis(
     state: State<'_, DbState>,
+    _school_id: String,
+) -> Result<Vec<AgeBucket>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_age_analysis_inner(&conn, _school_id)
+}
+
+pub fn get_student_history_inner(
+    conn: &Connection,
     student_id: String,
 ) -> Result<Vec<StudentHistoryEntry>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-
     let mut entries: Vec<StudentHistoryEntry> = Vec::new();
 
     // Invoices as debits
@@ -336,4 +356,13 @@ pub fn get_student_history(
     }
 
     Ok(entries)
+}
+
+#[tauri::command]
+pub fn get_student_history(
+    state: State<'_, DbState>,
+    student_id: String,
+) -> Result<Vec<StudentHistoryEntry>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    get_student_history_inner(&conn, student_id)
 }
