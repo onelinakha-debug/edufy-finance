@@ -218,6 +218,17 @@ export const whatsappApi = {
     cmd<any>("generate_payment_link", { schoolId, invoiceId, phone }),
   enqueue: (schoolId: string, parentPhone: string, templateName: string, paramsJson?: string) =>
     cmd<any>("enqueue_whatsapp", { schoolId, parentPhone, templateName, paramsJson }),
+  requestLink: (admissionNo: string, phone: string) =>
+    cmd<{ masked_phones: string[]; expires_in_min: number; already_linked: boolean }>("request_link_otp", { admissionNo, phone }),
+  verifyLink: (admissionNo: string, phone: string, code: string) =>
+    cmd<string>("verify_link_otp", { admissionNo, phone, code }),
+  linkRequests: (schoolId: string) =>
+    cmd<any[]>("list_link_requests", { schoolId }),
+  revealCode: (otpId: string, performedBy: string) =>
+    cmd<string>("reveal_link_code", { otpId, performedBy }),  sweepReminders: (schoolId: string) =>
+    cmd<{ queued: number }>("sweep_reminders", { schoolId }),
+  status: () =>
+    cmd<{ whatsapp_configured: boolean; sms_configured: boolean; outbox_pending: number; link_requests_pending: number }>("whatsapp_status", {}),
 };
 
 export const payApi = {

@@ -337,7 +337,68 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             created_at      TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_paylink_expires ON payment_links(expires_at);
-        CREATE INDEX IF NOT EXISTS idx_paylink_invoice ON payment_links(invoice_id);")?;
+        CREATE INDEX IF NOT EXISTS idx_paylink_invoice ON payment_links(invoice_id);
+
+        -- Parent link OTPs (admission-no + code verification)
+        -- NOTE: `code` is plaintext by design: 6 digits, 10-min TTL, single-use,
+        -- 5-attempt lockout, auto-purged by worker. Bursar reveals are audit-logged.
+        -- (Phase 0 dev DBs used `code_hash`; rebuild dev DBs — no production exists yet.)
+        CREATE TABLE IF NOT EXISTS parent_link_otps (
+            id              TEXT PRIMARY KEY,
+            school_id       TEXT NOT NULL REFERENCES schools(id),
+            student_id      TEXT NOT NULL REFERENCES students(id),
+            requester_phone TEXT NOT NULL,
+            code            TEXT NOT NULL,
+            attempts        INTEGER NOT NULL DEFAULT 0,
+            used_at         TEXT,
+            expires_at      TEXT NOT NULL,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_linkotp_student ON parent_link_otps(student_id);
+        CREATE INDEX IF NOT EXISTS idx_linkotp_expires ON parent_link_otps(expires_at);")?;
+
+    // Parents hardening columns (idempotent guards for existing DBs)
+    ensure_column(conn, "parents", "phone_e164", "TEXT")?;
+    ensure_column(conn, "parents", "sms_opt_out", "INTEGER DEFAULT 0")?;
+    ensure_column(conn, "parents", "preferred_lang", "TEXT DEFAULT 'en'")?;
+    backfill_phone_e164(conn);
 
     Ok(())
+}
+
+/// ADD COLUMN if missing (SQLite has no IF NOT EXISTS for columns).
+fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
+        rusqlite::params![table, column],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    if exists == 0 {
+        let sql = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, ddl);
+        // Ignore errors (e.g. concurrent migration) — column presence is re-checked next boot.
+        let _ = conn.execute_batch(&sql);
+    }
+    Ok(())
+}
+
+/// Best-effort normalize of legacy parent phones to E.164 2547XXXXXXXX.
+fn backfill_phone_e164(conn: &Connection) {
+    let rows: Vec<(String, String)> = conn.prepare("SELECT id, phone FROM parents WHERE phone_e164 IS NULL OR phone_e164 = ''")
+        .and_then(|mut s| s.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).and_then(|r| r.collect::<Result<Vec<_>, _>>()))
+        .unwrap_or_default();
+    for (id, phone) in rows {
+        let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
+        let e164 = if digits.starts_with("254") && digits.len() == 12 {
+            Some(digits)
+        } else if digits.starts_with('0') && digits.len() == 10 {
+            Some(format!("254{}", &digits[1..]))
+        } else if digits.len() == 9 {
+            Some(format!("254{}", digits))
+        } else {
+            None
+        };
+        if let Some(e) = e164 {
+            let _ = conn.execute("UPDATE parents SET phone_e164 = ?1 WHERE id = ?2", rusqlite::params![e, id]);
+        }
+    }
 }

@@ -421,6 +421,26 @@ pub struct ParentBalance {
     pub outstanding: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkOtpRequest {
+    pub masked_phones: Vec<String>,
+    pub expires_in_min: i64,
+    pub already_linked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingLinkRequest {
+    pub otp_id: String,
+    pub student_id: String,
+    pub admission_no: String,
+    pub student_name: String,
+    pub grade: String,
+    pub requester_phone: String,
+    pub attempts: i32,
+    pub expires_at: String,
+    pub created_at: String,
+}
+
 // ═══ C2B ═══
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

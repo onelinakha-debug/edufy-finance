@@ -346,8 +346,7 @@ pub fn extract_inbound(payload: &WhatsAppIncoming) -> Option<(String, String)> {
 }
 
 // WaValue needs Clone for extract_inbound
-impl Clone for WaValue {
-    fn clone(&self) -> Self {
+impl Clone for WaValue {    fn clone(&self) -> Self {
         Self {
             contacts: self.contacts.iter().map(|c| WaContact { wa_id: c.wa_id.clone() }).collect(),
             messages: self.messages.iter().map(|m| WaMessage {
@@ -360,5 +359,80 @@ impl Clone for WaValue {
                 }),
             }).collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ke_phone_normalizes_all_common_forms() {
+        assert_eq!(normalize_ke_phone("0712345678").as_deref(), Some("254712345678"));
+        assert_eq!(normalize_ke_phone("+254712345678").as_deref(), Some("254712345678"));
+        assert_eq!(normalize_ke_phone("254712345678").as_deref(), Some("254712345678"));
+        assert_eq!(normalize_ke_phone("712345678").as_deref(), Some("254712345678"));
+        assert_eq!(normalize_ke_phone("0712 345 678").as_deref(), Some("254712345678"));
+        assert_eq!(normalize_ke_phone("123"), None);
+        assert_eq!(normalize_ke_phone(""), None);
+    }
+
+    #[test]
+    fn kes_formats_with_thousands() {
+        assert_eq!(format_kes(30000), "KES 30,000");
+        assert_eq!(format_kes(1500), "KES 1,500");
+        assert_eq!(format_kes(500), "KES 500");
+        assert_eq!(format_kes(0), "KES 0");
+    }
+
+    #[test]
+    fn hmac_verify_accepts_known_vector() {
+        // echo -n "hello" | openssl dgst -sha256 -hmac "secret" (= .NET HMACSHA256 check)
+        let body = b"hello";
+        let sig = "sha256=88aab3ede8d3adf94d26ab90d3bafd4a2083070c3bcce9c014ee04a443847c0b";
+        assert!(verify_meta_signature("secret", body, sig));
+        assert!(!verify_meta_signature("secret", body, "sha256=deadbeef"));
+        assert!(!verify_meta_signature("", body, sig));
+    }
+
+    #[test]
+    fn inbound_extracts_text_and_buttons() {
+        let text_payload: WhatsAppIncoming = serde_json::from_value(serde_json::json!({
+            "object": "whatsapp_business_account",
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "contacts": [{"wa_id": "254712345678"}],
+                        "messages": [{"from": "254712345678", "type": "text", "text": {"body": "BALANCE"}}]
+                    }
+                }]
+            }]
+        })).unwrap();
+        assert_eq!(
+            extract_inbound(&text_payload),
+            Some(("254712345678".to_string(), "BALANCE".to_string()))
+        );
+
+        let btn_payload: WhatsAppIncoming = serde_json::from_value(serde_json::json!({
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "contacts": [{"wa_id": "254700000001"}],
+                        "messages": [{"from": "", "type": "interactive",
+                            "interactive": {"button_reply": {"id": "pay_mpesa", "title": "Pay"}}}]
+                    }
+                }]
+            }]
+        })).unwrap();
+        assert_eq!(
+            extract_inbound(&btn_payload),
+            Some(("254700000001".to_string(), "btn:pay_mpesa".to_string()))
+        );
+    }
+
+    #[test]
+    fn phone_masking_hides_middle_digits() {
+        assert_eq!(mask_phone("254712345678"), "2547***678");
+        assert_eq!(mask_phone("12"), "***");
     }
 }

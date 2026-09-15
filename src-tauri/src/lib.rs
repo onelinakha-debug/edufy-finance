@@ -112,6 +112,12 @@ pub fn run() {
             commands::whatsapp::lookup_parent_balances,
             commands::whatsapp::generate_payment_link,
             commands::whatsapp::enqueue_whatsapp,
+            commands::whatsapp::request_link_otp,
+            commands::whatsapp::verify_link_otp,
+            commands::whatsapp::list_link_requests,
+            commands::whatsapp::reveal_link_code,
+            commands::whatsapp::sweep_reminders,
+            commands::whatsapp::whatsapp_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Edufy Finance");

@@ -11,13 +11,14 @@ import { SearchSelect } from "@/components/ui/search-select";
 import { GradeManagementPanel } from "@/components/settings/grade-management";
 import { PromotionPanel } from "@/components/settings/promotion-panel";
 import { MpesaConfigPanel } from "@/components/settings/mpesa-config";
+import { WhatsAppPanel } from "@/components/settings/whatsapp-panel";
 import { C2bMonitor } from "@/components/payments/c2b-monitor";
 import {
   Save, Loader2, Download, Upload, AlertTriangle,
   Settings as SettingsIcon, Zap,
 } from "lucide-react";
 
-type Section = "school" | "grades" | "promotion" | "discounts" | "compliance" | "payments" | "users" | "backup";
+type Section = "school" | "grades" | "promotion" | "discounts" | "compliance" | "payments" | "whatsapp" | "users" | "backup";
 
 const SECTIONS: { id: Section; label: string; description: string }[] = [
   { id: "school", label: "School Profile", description: "Name, type, contacts" },
@@ -26,6 +27,7 @@ const SECTIONS: { id: Section; label: string; description: string }[] = [
   { id: "discounts", label: "Discounts", description: "Bulk & sibling rules" },
   { id: "compliance", label: "CBC Compliance", description: "Fee cap checker" },
   { id: "payments", label: "Payment Methods", description: "M-Pesa, bank, cash" },
+  { id: "whatsapp", label: "WhatsApp Bot", description: "Parent bot & reminders" },
   { id: "users", label: "Users", description: "Staff & roles" },
   { id: "backup", label: "Backup & Restore", description: "Export / import data" },
 ];
@@ -262,6 +264,8 @@ export default function SettingsPage() {
               </div>
             </div>
           )}
+
+          {activeSection === "whatsapp" && <div className="card-claude p-3"><WhatsAppPanel schoolId={currentSchoolId || ""} /></div>}
 
           {activeSection === "users" && <div className="card-claude p-3"><UserManagementPanel schoolId={currentSchoolId || ""} /></div>}
 

@@ -210,7 +210,7 @@ async fn handle_wa_inbound(state: Arc<AppState>, payload: wa::WhatsAppIncoming) 
     log::info!("WhatsApp inbound from {}", wa::mask_phone(&phone));
     let text = text_raw.trim().to_lowercase();
 
-    // Balance lookup
+    // Balance lookup (sender phone → linked children)
     let balances = {
         let conn = match lock_db(&state) {
             Ok(c) => c,
@@ -219,28 +219,47 @@ async fn handle_wa_inbound(state: Arc<AppState>, payload: wa::WhatsAppIncoming) 
         commands::whatsapp::lookup_parent_balances_inner(&conn, &phone).unwrap_or_default()
     };
 
-    let reply: String = if text == "balance" || text == "bal" || text == "fee" || text == "ada" {
-        build_balance_reply(&balances)
+    // (reply text, optional interactive buttons [(id, title)])
+    let (reply, buttons): (String, Vec<(&str, &str)>) = if text == "balance" || text == "bal" || text == "fee" || text == "ada" {
+        let r = build_balance_reply(&balances);
+        let b = if balances.is_empty() { vec![] } else { vec![("pay_mpesa", "💳 Pay"), ("statement", "📄 Statement"), ("talk_bursar", "💬 Bursar")] };
+        (r, b)
     } else if text == "pay" || text == "lipa" {
-        build_pay_reply(&state, &phone, &balances).await
+        (build_pay_reply(&state, &phone, &balances).await, vec![])
+    } else if text == "statement" || text == "statement_ready" {
+        (build_statement_reply(&state, &balances), vec![])
+    } else if text == "plan" {
+        (build_plan_reply(&state, &balances), vec![])
     } else if text.chars().all(|c| c.is_ascii_digit()) && (3..=10).contains(&text.len()) {
-        // Admission-no lookup: match against linked children
+        // Admission no: linked → balance; unlinked → OTP challenge to on-file number.
         let hit: Vec<_> = balances.iter().filter(|b| b.admission_no == text_raw.trim()).collect();
-        if hit.is_empty() {
-            "I couldn't find that admission number on this phone number. Reply BALANCE to see linked children, or contact your bursar to link your number.".to_string()
+        if !hit.is_empty() {
+            let owned: Vec<_> = hit.into_iter().cloned().collect();
+            let r = build_balance_reply(&owned);
+            (r, vec![("pay_mpesa", "💳 Pay"), ("statement", "📄 Statement"), ("talk_bursar", "💬 Bursar")])
         } else {
-            build_balance_reply(&hit.into_iter().cloned().collect::<Vec<_>>())
+            (request_otp_reply(&state, text_raw.trim(), &phone), vec![])
         }
     } else if text.starts_with("btn:") {
         match text.as_str() {
-            "btn:pay_mpesa" => build_pay_reply(&state, &phone, &balances).await,
-            "btn:talk_bursar" => bursar_contact(&state),
-            _ => build_balance_reply(&balances),
+            "btn:pay_mpesa" => (build_pay_reply(&state, &phone, &balances).await, vec![]),
+            "btn:statement" => (build_statement_reply(&state, &balances), vec![]),
+            "btn:plan" => (build_plan_reply(&state, &balances), vec![]),
+            "btn:talk_bursar" => (bursar_contact(&state), vec![]),
+            _ => (build_balance_reply(&balances), vec![]),
+        }
+    } else if text.contains(' ') {
+        // "34567 482913" → admission + OTP verify
+        let parts: Vec<&str> = text_raw.trim().split_whitespace().collect();
+        if parts.len() == 2 && parts[1].len() == 6 && parts[1].chars().all(|c| c.is_ascii_digit()) {
+            (verify_otp_reply(&state, parts[0], &phone, parts[1]), vec![])
+        } else {
+            (help_text().to_string(), vec![])
         }
     } else if ["hi", "hello", "start", "menu", "help", "msaada"].contains(&text.as_str()) {
-        help_text().to_string()
+        (help_text().to_string(), vec![])
     } else {
-        help_text().to_string()
+        (help_text().to_string(), vec![])
     };
 
     // Persist to outbox (audit + retry) and attempt direct send
@@ -265,11 +284,96 @@ async fn handle_wa_inbound(state: Arc<AppState>, payload: wa::WhatsAppIncoming) 
 
     if let Some(cfg) = wa::WhatsAppConfig::from_env() {
         if cfg.is_configured() {
-            if let Err(e) = wa::send_text(&cfg, &phone, &reply).await {
+            let res = if buttons.is_empty() {
+                wa::send_text(&cfg, &phone, &reply).await
+            } else {
+                wa::send_interactive_buttons(&cfg, &phone, &reply, &buttons).await
+            };
+            if let Err(e) = res {
                 log::warn!("WhatsApp direct send failed for {}: {}", wa::mask_phone(&phone), e);
             }
         }
     }
+}
+
+fn request_otp_reply(state: &Arc<AppState>, admission_no: &str, requester_phone: &str) -> String {
+    let res = lock_db(state).map_err(|_| "busy".to_string()).and_then(|conn| {
+        commands::whatsapp::request_link_otp_inner(&conn, admission_no, requester_phone).map_err(|e| e)
+    });
+    match res {
+        Ok(r) if r.already_linked => {
+            // Number got linked meanwhile (or was already) — show balance.
+            let balances = lock_db(state).ok()
+                .and_then(|conn| commands::whatsapp::lookup_parent_balances_inner(&conn, requester_phone).ok())
+                .unwrap_or_default();
+            build_balance_reply(&balances)
+        }
+        Ok(r) => format!(
+            "🔐 For security, I've sent a 6-digit code to the parent number on file ({}). Reply with `{}` + code, e.g. `{} 482913`. Valid {} min.",
+            r.masked_phones.join(", "), admission_no, admission_no, r.expires_in_min
+        ),
+        Err(e) => e,
+    }
+}
+
+fn verify_otp_reply(state: &Arc<AppState>, admission_no: &str, requester_phone: &str, code: &str) -> String {
+    match lock_db(state) {
+        Ok(conn) => match commands::whatsapp::verify_link_otp_inner(&conn, admission_no, requester_phone, code) {
+            Ok(msg) => msg,
+            Err(e) => e,
+        },
+        Err(_) => "Service busy, try again in a minute.".to_string(),
+    }
+}
+
+fn build_statement_reply(state: &Arc<AppState>, balances: &[crate::models::ParentBalance]) -> String {
+    let b = match balances.first() {
+        Some(v) => v,
+        None => return "No child is linked to this number yet. Reply with the admission number to start.".to_string(),
+    };
+    // If several children, give the first + hint; parent can scope via admission no later (v1).
+    let extra = if balances.len() > 1 {
+        "\n\n_Showing first child — full multi-child statements come with the PDF in Phase 4._".to_string()
+    } else {
+        String::new()
+    };
+    match lock_db(state) {
+        Ok(conn) => match commands::whatsapp::text_statement_inner(&conn, &b.student_id) {
+            Ok(s) => format!("{}{}", s, extra),
+            Err(e) => e,
+        },
+        Err(_) => "Service busy, try again in a minute.".to_string(),
+    }
+}
+
+fn build_plan_reply(state: &Arc<AppState>, balances: &[crate::models::ParentBalance]) -> String {
+    let name = balances.first().map(|b| b.student_name.clone()).unwrap_or_else(|| "your child".to_string());
+    // Notify bursar via outbox if we can resolve school + school phone.
+    if let Some(b) = balances.first() {
+        if let Ok(conn) = lock_db(state) {
+            if let Ok(school_id) = conn.query_row(
+                "SELECT school_id FROM students WHERE id = ?1",
+                rusqlite::params![b.student_id],
+                |row| row.get::<_, String>(0),
+            ) {
+                let bursar_phone: Option<String> = conn.query_row(
+                    "SELECT value FROM settings WHERE key = 'school_phone'",
+                    [],
+                    |row| row.get(0),
+                ).ok().filter(|p: &String| !p.is_empty());
+                if let Some(bp) = bursar_phone {
+                    let params = serde_json::json!({
+                        "body": format!("📅 Payment-plan request: {} (Adm {}) — parent {} asked to discuss a plan. Please call them.", b.student_name, b.admission_no, "via WhatsApp")
+                    }).to_string();
+                    let _ = commands::whatsapp::enqueue_outbox_inner(&conn, &school_id, &bp, "plan_request", &params, None);
+                }
+            }
+        }
+    }
+    format!(
+        "📅 Noted, {}. I've alerted the bursar — they'll contact you to agree a payment plan. Your current balance still stands; keep it in mind for the discussion.",
+        name
+    )
 }
 
 fn build_balance_reply(balances: &[crate::models::ParentBalance]) -> String {
@@ -344,7 +448,7 @@ fn bursar_contact(state: &Arc<AppState>) -> String {
 }
 
 fn help_text() -> &'static str {
-    "👋 *Edufy Fee Bot*\nReply:\n• BALANCE — fee balance\n• PAY — M-Pesa pay link\n• STATEMENT — full statement\n• BURSAR — school contact"
+    "👋 *Edufy Fee Bot*\nReply:\n• BALANCE — fee balance\n• PAY — M-Pesa pay link\n• STATEMENT — mini-statement\n• PLAN — request a payment plan\n• BURSAR — school contact\n• New number? Send admission no., then reply `adm_no code`."
 }
 
 // ═══ PAYMENT LINKS (public snapshot + authed generation) ═══
@@ -473,6 +577,216 @@ async fn enqueue_wa(
         &conn, &a.school_id, &a.parent_phone, &a.template_name,
         &a.params_json.unwrap_or_else(|| "{}".into()), None,
     ).map_err(AppError)?))
+}
+
+// ═══ PARENT LINKING + REMINDERS (authed) ═══
+
+#[derive(Deserialize)]
+struct LinkReqReq { admission_no: String, phone: String }
+#[derive(Deserialize)]
+struct LinkVerifyReq { admission_no: String, phone: String, code: String }
+
+async fn wa_link_request(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<LinkReqReq>,
+) -> Result<Json<crate::models::LinkOtpRequest>, AppError> {
+    let conn = lock_db(&s)?;
+    Ok(Json(commands::whatsapp::request_link_otp_inner(&conn, &a.admission_no, &a.phone).map_err(AppError)?))
+}
+
+async fn wa_link_verify(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<LinkVerifyReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let conn = lock_db(&s)?;
+    let msg = commands::whatsapp::verify_link_otp_inner(&conn, &a.admission_no, &a.phone, &a.code).map_err(AppError)?;
+    Ok(Json(serde_json::json!({"message": msg})))
+}
+
+async fn wa_link_requests(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<SchoolIdReq>,
+) -> Result<Json<Vec<crate::models::PendingLinkRequest>>, AppError> {
+    let conn = lock_db(&s)?;
+    Ok(Json(commands::whatsapp::list_link_requests_inner(&conn, &a.school_id).map_err(AppError)?))
+}
+
+#[derive(Deserialize)]
+struct RevealReq { otp_id: String, performed_by: String }
+
+async fn wa_reveal_code(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<RevealReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let conn = lock_db(&s)?;
+    let code = commands::whatsapp::reveal_link_code_inner(&conn, &a.otp_id, &a.performed_by).map_err(AppError)?;
+    Ok(Json(serde_json::json!({"code": code})))
+}
+
+async fn wa_sweep_reminders(
+    AxumState(s): AxumState<Arc<AppState>>,
+    Json(a): Json<SchoolIdReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let conn = lock_db(&s)?;
+    let n = crate::services::scheduler::enqueue_due_reminders_inner(&conn, &a.school_id).map_err(AppError)?;
+    Ok(Json(serde_json::json!({"queued": n})))
+}
+
+async fn wa_status(
+    AxumState(s): AxumState<Arc<AppState>>,
+    _: Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let conn = lock_db(&s)?;
+    let pending: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM whatsapp_outbox WHERE status = 'pending'",
+        [],
+        |row| row.get(0),
+    ).map_err(|e| AppError(e.to_string()))?;
+    let links_pending: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM parent_link_otps WHERE used_at IS NULL AND expires_at > datetime('now')",
+        [],
+        |row| row.get(0),
+    ).map_err(|e| AppError(e.to_string()))?;
+    let wa_cfg = wa::WhatsAppConfig::from_env();
+    Ok(Json(serde_json::json!({
+        "whatsapp_configured": wa_cfg.as_ref().map(|c| c.is_configured()).unwrap_or(false),
+        "sms_configured": crate::services::sms::SmsConfig::from_env().is_some(),
+        "outbox_pending": pending,
+        "link_requests_pending": links_pending,
+    })))
+}
+
+// ═══ OUTBOX WORKER (WhatsApp primary, SMS fallback) ═══
+
+struct OutboxJob {
+    id: String,
+    parent_phone: String,
+    template_name: String,
+    params_json: String,
+    retry_count: i32,
+}
+
+fn outbox_body(params_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(params_json).ok()
+        .and_then(|v| v.get("body")?.as_str().map(|s| s.to_string()))
+        .filter(|s| !s.is_empty())
+}
+
+async fn drain_outbox_once(state: &Arc<AppState>) {
+    let jobs: Vec<OutboxJob> = match lock_db(state) {
+        Ok(conn) => conn.prepare(
+            "SELECT id, parent_phone, template_name, params_json, retry_count FROM whatsapp_outbox
+             WHERE status = 'pending' AND (scheduled_for IS NULL OR scheduled_for <= datetime('now'))
+             ORDER BY created_at ASC LIMIT 20",
+        ).and_then(|mut st| st.query_map([], |row| Ok(OutboxJob {
+            id: row.get(0)?, parent_phone: row.get(1)?, template_name: row.get(2)?,
+            params_json: row.get(3)?, retry_count: row.get(4)?,
+        })).and_then(|r| r.collect::<Result<Vec<_>, _>>()))
+        .unwrap_or_default(),
+        Err(_) => return,
+    };
+
+    let wa_cfg = wa::WhatsAppConfig::from_env().filter(|c| c.is_configured());
+    let sms_cfg = crate::services::sms::SmsConfig::from_env();
+
+    for job in jobs {
+        let body = match outbox_body(&job.params_json) {
+            Some(b) => b,
+            None => {
+                if let Ok(conn) = lock_db(state) {
+                    let _ = conn.execute(
+                        "UPDATE whatsapp_outbox SET status='failed', retry_count=retry_count+1 WHERE id=?1",
+                        rusqlite::params![job.id],
+                    );
+                }
+                continue;
+            }
+        };
+
+        // 1) WhatsApp attempt
+        let mut sent_via: Option<(&str, Option<String>)> = None;
+        if let Some(cfg) = wa_cfg.as_ref() {
+            match wa::send_text(cfg, &job.parent_phone, &body).await {
+                Ok(msg_id) => sent_via = Some(("whatsapp", msg_id)),
+                Err(e) => log::warn!("outbox {} ({}) wa send failed (try {}): {}", job.id, job.template_name, job.retry_count, e),
+            }
+        }
+
+        // 2) SMS fallback after 2 failed WhatsApp attempts
+        if sent_via.is_none() && job.retry_count >= 2 {
+            if let Some(cfg) = sms_cfg.as_ref() {
+                match crate::services::sms::send_sms(cfg, &job.parent_phone, &body).await {
+                    Ok(()) => sent_via = Some(("sms", None)),
+                    Err(e) => log::warn!("outbox {} sms fallback failed: {}", job.id, e),
+                }
+            }
+        }
+
+        if let Ok(conn) = lock_db(state) {
+            match sent_via {
+                Some((channel, msg_id)) => {
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let _ = conn.execute(
+                        "UPDATE whatsapp_outbox SET status='sent', channel=?1, meta_msg_id=?2, sent_at=?3 WHERE id=?4",
+                        rusqlite::params![channel, msg_id, now, job.id],
+                    );
+                }
+                None => {
+                    // Exponential-ish backoff via scheduled_for; dead-letter after 5 tries.
+                    if job.retry_count + 1 >= 5 {
+                        let _ = conn.execute(
+                            "UPDATE whatsapp_outbox SET status='failed', retry_count=retry_count+1 WHERE id=?1",
+                            rusqlite::params![job.id],
+                        );
+                    } else {
+                        let delay_min = [5, 15, 60, 180][job.retry_count.min(3) as usize];
+                        let _ = conn.execute(
+                            "UPDATE whatsapp_outbox SET retry_count=retry_count+1, scheduled_for=datetime('now', ?1) WHERE id=?2",
+                            rusqlite::params![format!("+{} minutes", delay_min), job.id],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Opportunistic cleanup: drop expired sessions + used/expired OTPs older than a day.
+    if let Ok(conn) = lock_db(state) {
+        let _ = conn.execute("DELETE FROM whatsapp_sessions WHERE expires_at <= datetime('now')", []);
+        let _ = conn.execute(
+            "DELETE FROM parent_link_otps WHERE (used_at IS NOT NULL OR expires_at <= datetime('now', '-1 day'))",
+            [],
+        );
+    }
+}
+
+async fn outbox_worker(state: Arc<AppState>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        drain_outbox_once(&state).await;
+    }
+}
+
+async fn reminder_scheduler(state: Arc<AppState>) {
+    // Let boot settle, then sweep daily.
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    loop {
+        let schools: Vec<String> = lock_db(&state).ok()
+            .and_then(|conn| conn.prepare("SELECT id FROM schools")
+                .and_then(|mut st| st.query_map([], |row| row.get(0))
+                    .and_then(|r| r.collect::<Result<Vec<String>, _>>())).ok())
+            .unwrap_or_default();
+        for school_id in schools {
+            if let Ok(conn) = lock_db(&state) {
+                match crate::services::scheduler::enqueue_due_reminders_inner(&conn, &school_id) {
+                    Ok(n) if n > 0 => log::info!("scheduler: queued {} reminders for {}", n, school_id),
+                    Ok(_) => {}
+                    Err(e) => log::warn!("scheduler sweep failed for {}: {}", school_id, e),
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
+    }
 }
 
 async fn login_handler(
@@ -763,6 +1077,12 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/whatsapp/balances", post(wa_balances))
         .route("/whatsapp/generate-link", post(generate_link))
         .route("/whatsapp/enqueue", post(enqueue_wa))
+        .route("/whatsapp/link-request", post(wa_link_request))
+        .route("/whatsapp/link-verify", post(wa_link_verify))
+        .route("/whatsapp/link-requests", post(wa_link_requests))
+        .route("/whatsapp/reveal-code", post(wa_reveal_code))
+        .route("/whatsapp/sweep-reminders", post(wa_sweep_reminders))
+        .route("/whatsapp/status", post(wa_status))
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -808,6 +1128,10 @@ pub async fn start() {
         db: DbState(Mutex::new(conn)),
         jwt_secret: jwt_secret.into_bytes(),
     });
+
+    // Background: WhatsApp outbox drain (5s) + daily reminder sweep.
+    tokio::spawn(outbox_worker(state.clone()));
+    tokio::spawn(reminder_scheduler(state.clone()));
 
     let app = build_router(state);
 

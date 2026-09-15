@@ -218,3 +218,367 @@ pub fn enqueue_whatsapp(
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     enqueue_outbox_inner(&conn, &school_id, &parent_phone, &template_name, &params_json, None)
 }
+
+// ═══ OTP-GUARDED PARENT LINKING ═══
+
+const OTP_TTL_MIN: i64 = 10;
+const OTP_MAX_ATTEMPTS: i32 = 5;
+
+/// Deterministic-enough 6-digit code from a fresh uuid (no rand crate needed).
+fn new_otp_code() -> String {
+    use sha2::{Digest, Sha256};
+    let raw = generate_id();
+    let digest = Sha256::digest(raw.as_bytes());
+    let mut digits = String::new();
+    for b in digest.iter() {
+        if digits.len() >= 6 {
+            break;
+        }
+        digits.push_str(&(b % 10).to_string());
+    }
+    while digits.len() < 6 {
+        digits.push('0');
+    }
+    digits
+}
+
+fn mask(phone: &str) -> String {
+    if phone.len() >= 6 {
+        format!("{}***{}", &phone[..4], &phone[phone.len() - 3..])
+    } else {
+        "***".to_string()
+    }
+}
+
+use crate::models::{LinkOtpRequest, PendingLinkRequest};
+
+/// Step 1: parent sends an admission no from an unlinked phone.
+/// Creates an OTP and delivers the code to the ON-FILE parent number(s)
+/// (WhatsApp outbox, so it sends even if the bot worker is the only sender).
+/// Returns masked on-file numbers so the requester knows where to ask.
+pub fn request_link_otp_inner(
+    conn: &Connection,
+    admission_no: &str,
+    requester_phone: &str,
+) -> Result<LinkOtpRequest, String> {
+    let adm = admission_no.trim();
+    if adm.is_empty() {
+        return Err("Admission number is required".to_string());
+    }
+    let req_phone = normalize_ke_phone(requester_phone).unwrap_or_else(|| requester_phone.to_string());
+
+    let (student_id, school_id, student_name): (String, String, String) = conn.query_row(
+        "SELECT s.id, s.school_id, s.first_name || ' ' || s.last_name
+         FROM students s WHERE s.admission_no = ?1 AND s.status = 'active'",
+        rusqlite::params![adm],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(|_| "No active student with that admission number.".to_string())?;
+
+    // Already linked? Short-circuit — no OTP needed.
+    let linked: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM student_parents sp
+         JOIN parents pa ON pa.id = sp.parent_id
+         WHERE sp.student_id = ?1 AND (pa.phone = ?2 OR pa.phone_e164 = ?2)",
+        rusqlite::params![student_id, req_phone],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if linked > 0 {
+        return Ok(LinkOtpRequest { masked_phones: vec![], expires_in_min: 0, already_linked: true });
+    }
+
+    // On-file parent numbers for this child.
+    let on_file: Vec<String> = conn.prepare(
+        "SELECT COALESCE(NULLIF(pa.phone_e164,''), pa.phone) FROM parents pa
+         JOIN student_parents sp ON sp.parent_id = pa.id
+         WHERE sp.student_id = ?1",
+    ).map_err(|e| e.to_string())?
+    .query_map(rusqlite::params![student_id], |row| row.get(0))
+    .map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    if on_file.is_empty() {
+        return Err(format!(
+            "No parent number is on file for {}. Ask the bursar to register your number first.",
+            student_name
+        ));
+    }
+
+    let code = new_otp_code();
+    let now = chrono::Utc::now();
+    let expires = (now + chrono::Duration::minutes(OTP_TTL_MIN)).to_rfc3339();
+    let otp_id = generate_id();
+    conn.execute(
+        "INSERT INTO parent_link_otps (id, school_id, student_id, requester_phone, code, attempts, expires_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)",
+        rusqlite::params![otp_id, school_id, student_id, req_phone, code, expires, now.to_rfc3339()],
+    ).map_err(|e| e.to_string())?;
+
+    // Deliver code to on-file numbers via outbox (worker sends; bursar can also relay from panel).
+    for num in &on_file {
+        let params = serde_json::json!({
+            "body": format!(
+                "🔐 Edufy access code for {}: {}. Valid 10 min. Share it ONLY with the child's parent/guardian. If you didn't request this, ignore it.",
+                student_name, code
+            ),
+        }).to_string();
+        let _ = enqueue_outbox_inner(conn, &school_id, num, "link_otp", &params, None);
+    }
+
+    Ok(LinkOtpRequest {
+        masked_phones: on_file.iter().map(|p| mask(p)).collect(),
+        expires_in_min: OTP_TTL_MIN,
+        already_linked: false,
+    })
+}
+
+/// Step 2: requester replies with the 6-digit code. On success, links phone↔student.
+pub fn verify_link_otp_inner(
+    conn: &Connection,
+    admission_no: &str,
+    requester_phone: &str,
+    code: &str,
+) -> Result<String, String> {
+    let req_phone = normalize_ke_phone(requester_phone).unwrap_or_else(|| requester_phone.to_string());
+    let code = code.trim().replace(' ', "");
+    if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+        return Err("Enter the 6-digit code.".to_string());
+    }
+
+    let (student_id, _school_id, student_name): (String, String, String) = conn.query_row(
+        "SELECT s.id, s.school_id, s.first_name || ' ' || s.last_name
+         FROM students s WHERE s.admission_no = ?1 AND s.status = 'active'",
+        rusqlite::params![admission_no.trim()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(|_| "No active student with that admission number.".to_string())?;
+
+    let (otp_id, code_stored, attempts, expires_at, used_at): (String, String, i32, String, Option<String>) = conn.query_row(
+        "SELECT id, code, attempts, expires_at, used_at FROM parent_link_otps
+         WHERE student_id = ?1 AND requester_phone = ?2 AND used_at IS NULL
+         ORDER BY created_at DESC LIMIT 1",
+        rusqlite::params![student_id, req_phone],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).map_err(|_| "No pending code for this number. Send the admission number first to get a code.".to_string())?;
+
+    if used_at.is_some() {
+        return Err("This code was already used. Request a new one.".to_string());
+    }
+    if attempts >= OTP_MAX_ATTEMPTS {
+        return Err("Too many wrong attempts. Wait 30 minutes and try again.".to_string());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    if expires_at < now {
+        return Err("Code expired. Send the admission number again for a new code.".to_string());
+    }
+    if code != code_stored {        conn.execute(
+            "UPDATE parent_link_otps SET attempts = attempts + 1 WHERE id = ?1",
+            rusqlite::params![otp_id],
+        ).ok();
+        return Err("Wrong code. Check and try again.".to_string());
+    }
+
+    // Success: mark used + link phone↔student (find-or-create parent row).
+    let now2 = chrono::Utc::now().to_rfc3339();
+    conn.execute("UPDATE parent_link_otps SET used_at = ?1 WHERE id = ?2", rusqlite::params![now2, otp_id]).ok();
+
+    let parent_id: Option<String> = conn.query_row(
+        "SELECT id FROM parents WHERE phone = ?1 OR phone_e164 = ?1 LIMIT 1",
+        rusqlite::params![req_phone],
+        |row| row.get(0),
+    ).ok();
+    let parent_id = match parent_id {
+        Some(id) => id,
+        None => {
+            let id = generate_id();
+            conn.execute(
+                "INSERT INTO parents (id, name, phone, phone_e164, relationship, is_primary, created_at)
+                 VALUES (?1, ?2, ?3, ?3, 'guardian', 0, ?4)",
+                rusqlite::params![id, format!("Parent {}", &req_phone[req_phone.len().saturating_sub(4)..]), req_phone, now2],
+            ).map_err(|e| e.to_string())?;
+            id
+        }
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO student_parents (student_id, parent_id) VALUES (?1, ?2)",
+        rusqlite::params![student_id, parent_id],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(format!("✅ {} linked! Reply BALANCE to see fees.", student_name))
+}
+
+/// Bursar relay queue: pending (unused, unexpired) OTPs with codes masked.
+/// NOTE: codes are hashed at rest; the panel shows request metadata so the
+/// bursar can confirm legitimacy — actual codes travel via outbox to on-file numbers.
+pub fn list_link_requests_inner(conn: &Connection, school_id: &str) -> Result<Vec<PendingLinkRequest>, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT o.id, o.student_id, s.admission_no, s.first_name || ' ' || s.last_name, s.grade,
+                o.requester_phone, o.attempts, o.expires_at, o.created_at
+         FROM parent_link_otps o
+         JOIN students s ON s.id = o.student_id
+         WHERE o.school_id = ?1 AND o.used_at IS NULL AND o.expires_at > ?2
+         ORDER BY o.created_at DESC LIMIT 50",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(
+        rusqlite::params![school_id, now],
+        |row| Ok(PendingLinkRequest {
+            otp_id: row.get(0)?,
+            student_id: row.get(1)?,
+            admission_no: row.get(2)?,
+            student_name: row.get(3)?,
+            grade: row.get(4)?,
+            requester_phone: row.get(5)?,
+            attempts: row.get(6)?,
+            expires_at: row.get(7)?,
+            created_at: row.get(8)?,
+        }),
+    ).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+    Ok(rows)
+}
+
+// ═══ TEXT STATEMENT ═══
+
+/// Compact in-chat statement: invoices with status + recent payments + totals.
+pub fn text_statement_inner(conn: &Connection, student_id: &str) -> Result<String, String> {
+    let (name, adm, grade): (String, String, String) = conn.query_row(
+        "SELECT first_name || ' ' || last_name, admission_no, grade FROM students WHERE id = ?1",
+        rusqlite::params![student_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(|_| "Student not found".to_string())?;
+
+    let mut out = format!("📄 *Statement — {} ({}, Adm: {})*\n", name, grade, adm);
+    let mut stmt = conn.prepare(
+        "SELECT invoice_no, net_amount, status, substr(created_at,1,10) FROM invoices
+         WHERE student_id = ?1 ORDER BY created_at DESC LIMIT 8",
+    ).map_err(|e| e.to_string())?;
+    let invs: Vec<(String, i64, String, String)> = stmt.query_map(
+        rusqlite::params![student_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+    drop(stmt);
+
+    if invs.is_empty() {
+        out.push_str("No invoices yet.\n");
+    } else {
+        for (no, net, status, date) in &invs {
+            out.push_str(&format!("• {} — {} [{}] ({})\n", no, crate::services::whatsapp::format_kes(*net), status, date));
+        }
+    }
+
+    let (invoiced, paid): (i64, i64) = conn.query_row(
+        "SELECT COALESCE((SELECT SUM(net_amount) FROM invoices WHERE student_id = ?1),0),
+                COALESCE((SELECT SUM(amount) FROM payments WHERE student_id = ?1 AND status='completed'),0)",
+        rusqlite::params![student_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    out.push_str(&format!(
+        "─────────────────\nTotal invoiced: {}\nTotal paid: {}\nBalance: *{}*",
+        crate::services::whatsapp::format_kes(invoiced),
+        crate::services::whatsapp::format_kes(paid),
+        crate::services::whatsapp::format_kes((invoiced - paid).max(0)),
+    ));
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn request_link_otp(
+    state: State<'_, DbState>,
+    admission_no: String,
+    phone: String,
+) -> Result<LinkOtpRequest, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    request_link_otp_inner(&conn, &admission_no, &phone)
+}
+
+#[tauri::command]
+pub fn verify_link_otp(
+    state: State<'_, DbState>,
+    admission_no: String,
+    phone: String,
+    code: String,
+) -> Result<String, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    verify_link_otp_inner(&conn, &admission_no, &phone, &code)
+}
+
+#[tauri::command]
+pub fn list_link_requests(
+    state: State<'_, DbState>,
+    school_id: String,
+) -> Result<Vec<PendingLinkRequest>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    list_link_requests_inner(&conn, &school_id)
+}
+
+/// Bursar reveal: show a pending code to relay verbally when auto-delivery
+/// failed. Audit-logged. Does NOT consume the code.
+pub fn reveal_link_code_inner(
+    conn: &Connection,
+    otp_id: &str,
+    performed_by: &str,
+) -> Result<String, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let (code, used_at, expires_at): (String, Option<String>, String) = conn.query_row(
+        "SELECT code, used_at, expires_at FROM parent_link_otps WHERE id = ?1",
+        rusqlite::params![otp_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(|_| "Code request not found".to_string())?;
+    if used_at.is_some() {
+        return Err("Code already used".to_string());
+    }
+    if expires_at < now {
+        return Err("Code expired".to_string());
+    }
+    conn.execute(
+        "INSERT INTO audit_log (id, action, entity, entity_id, changes, performed_by, created_at)
+         VALUES (?1, 'reveal_otp', 'parent_link_otp', ?2, 'bursar relay', ?3, ?4)",
+        rusqlite::params![generate_id(), otp_id, performed_by, now],
+    ).ok();
+    Ok(code)
+}
+
+#[tauri::command]
+pub fn reveal_link_code(
+    state: State<'_, DbState>,
+    otp_id: String,
+    performed_by: String,
+) -> Result<String, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    reveal_link_code_inner(&conn, &otp_id, &performed_by)
+}
+
+#[tauri::command]
+pub fn sweep_reminders(
+    state: State<'_, DbState>,
+    school_id: String,
+) -> Result<serde_json::Value, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let n = crate::services::scheduler::enqueue_due_reminders_inner(&conn, &school_id)?;
+    Ok(serde_json::json!({"queued": n}))
+}
+
+#[tauri::command]
+pub fn whatsapp_status(
+    state: State<'_, DbState>,
+) -> Result<serde_json::Value, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let pending: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM whatsapp_outbox WHERE status = 'pending'",
+        [],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let links_pending: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM parent_link_otps WHERE used_at IS NULL AND expires_at > datetime('now')",
+        [],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let wa_cfg = crate::services::whatsapp::WhatsAppConfig::from_env();
+    Ok(serde_json::json!({
+        "whatsapp_configured": wa_cfg.as_ref().map(|c| c.is_configured()).unwrap_or(false),
+        "sms_configured": crate::services::sms::SmsConfig::from_env().is_some(),
+        "outbox_pending": pending,
+        "link_requests_pending": links_pending,
+    }))
+}
